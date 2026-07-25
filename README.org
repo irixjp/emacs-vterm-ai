@@ -1,7 +1,7 @@
 #+TITLE: vterm-ai
 #+AUTHOR: vterm-ai contributors
 
-[[file:how_it_works.mov]]
+[[file:how_it_works.mp4]]
 
 * Overview
 
