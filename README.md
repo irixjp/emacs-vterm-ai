@@ -1,6 +1,6 @@
 # vterm-ai
 
-![Demo](docs/how_it_works.mp4)
+![Demo](assets/how_it_works.mp4)
 
 ## Overview
 
