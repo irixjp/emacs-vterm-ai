@@ -1,6 +1,6 @@
 # vterm-ai
 
-[📹 デモ動画を見る](https://github.com/irixjp/emacs-vterm-ai/blob/main/assets/how_it_works.mp4)
+![demo](assets/how_it_works.gif)
 
 ## Overview
 
