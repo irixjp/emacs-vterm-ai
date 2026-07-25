@@ -269,8 +269,7 @@ WIDTH is the available window width."
           (goto-char (point-min))
           (special-mode)
           (local-set-key (kbd "q") (lambda () (interactive) (quit-window t))))
-        (display-buffer buf '(display-buffer-below-selected
-                              (window-height . 0.4)))))))
+        (switch-to-buffer buf)))))
 
 (defun vterm-ai-next-session ()
   "Move point to the next session."
