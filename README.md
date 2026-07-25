@@ -1,7 +1,7 @@
 # vterm-ai
 
 <video width="600" controls>
-  <source src="assets/how_it_works.mp4" type="video/mp4">
+  <source src="https://raw.githubusercontent.com/irixjp/emacs-vterm-ai/main/assets/how_it_works.mp4" type="video/mp4">
   Your browser does not support the video tag.
 </video>
 
