@@ -1,6 +1,8 @@
 #+TITLE: vterm-ai
 #+AUTHOR: vterm-ai contributors
 
+[[file:image.png]]
+
 * Overview
 
 vterm-ai is an Emacs package that provides a dashboard to monitor AI coding agent sessions running in vterm buffers.
