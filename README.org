@@ -1,7 +1,7 @@
 #+TITLE: vterm-ai
 #+AUTHOR: vterm-ai contributors
 
-[[file:image.png]]
+[[file:how_it_works.mov]]
 
 * Overview
 
@@ -23,7 +23,7 @@ It periodically collects session information and displays status, model, working
 - Emacs 27.1+
 - [[https://github.com/akermu/emacs-libvterm][vterm]]
 - [[https://docs.anthropic.com/en/docs/claude-code][Claude Code]] CLI (for the Claude provider)
-- [[https://openai.com/index/introducing-codex/][Codex]] CLI (for the Codex provider, optional)
+- [[https://openai.com/index/introducing-codex/][Codex]] CLI (for the Codex provider, experimental — see below)
 
 * Installation
 
@@ -88,6 +88,18 @@ Each provider registers a plist with the following keys:
 | =:detail=              | =(session) -> string=    | Generate detail view text            |
 
 To add support for a new agent (e.g. Cursor), create a new file that implements these four functions and calls =vterm-ai-register-provider=.
+
+* Notes
+
+** Codex provider (experimental)
+
+The Codex provider is disabled by default. To enable it:
+
+#+begin_src emacs-lisp
+(setq vterm-ai-enable-codex t)
+#+end_src
+
+Codex does not expose an API for querying session state (idle/busy/asking), so all Codex sessions are displayed as =RUNNING= (process active, state unknown). If Codex adds a status API in the future, this provider will be updated accordingly.
 
 * License
 

@@ -294,6 +294,9 @@ WIDTH is the available window width."
       (while (and (not (bobp))
                   (eq (get-text-property (point) 'vterm-ai-session) current))
         (forward-line -1))
+      (while (and (not (bobp))
+                  (not (get-text-property (point) 'vterm-ai-session)))
+        (forward-line -1))
       (let ((prev (get-text-property (point) 'vterm-ai-session)))
         (when prev
           (while (and (not (bobp))
