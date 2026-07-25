@@ -1,5 +1,6 @@
 # vterm-ai
 
+<video src="./how_it_works.mp4" controls width="100%"></video>
 https://github.com/user-attachments/assets/how_it_works.mp4
 
 ## Overview
