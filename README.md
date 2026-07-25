@@ -1,6 +1,6 @@
 # vterm-ai
 
-https://github.com/user-attachments/assets/how_it_works.mp4
+![Demo](docs/how_it_works.mp4)
 
 ## Overview
 
@@ -98,7 +98,7 @@ The Codex provider is disabled by default. To enable it:
 (setq vterm-ai-enable-codex t)
 ```
 
-Codex does not expose an API for querying session state (idle/busy/asking), so all Codex sessions are displayed as `RUNNING` (process active, state unknown). If Codex adds a status API in the future, this can be updated to support it.
+Codex does not expose an API for querying session state (idle/busy/asking), so all Codex sessions are displayed as `RUNNING` (process active, state unknown). If Codex adds a status API in the future, [...]
 
 ## License
 
