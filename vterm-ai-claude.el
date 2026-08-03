@@ -34,8 +34,11 @@ Return the process object for cancellation management."
                         (with-current-buffer (process-buffer proc)
                           (goto-char (point-min))
                           (condition-case nil
-                              (let ((r (json-parse-buffer :object-type 'alist)))
-                                (if (vectorp r) (append r nil) r))
+                              (let* ((r (json-parse-buffer :object-type 'alist))
+                                     (lst (if (vectorp r) (append r nil) r)))
+                                (cl-remove-if
+                                 (lambda (a) (equal (alist-get 'kind a) "background"))
+                                 lst))
                             (error nil)))))
            (when (buffer-live-p (process-buffer proc))
              (kill-buffer (process-buffer proc)))))))))
