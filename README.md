@@ -101,19 +101,46 @@ To add support for a new agent (e.g. Cursor), create a new file that implements 
 
 To enable, add `codex` to `vterm-ai-enabled-providers`.
 
-Codex does not expose an API for querying session state (idle/busy/asking), so all Codex sessions are displayed as `RUNNING` (process active, state unknown). If Codex adds a status API in the future, [...]
+This provider detects Codex processes and retrieves model info from `~/.codex/state_5.sqlite`. Status and project name are extracted from the vterm buffer name.
+
+#### Codex side configuration
+
+Add the following to `~/.codex/config.toml` under the `[tui]` section:
+
+```toml
+[tui]
+terminal_title = ["app-name", "activity", "run-state", "project-name"]
+```
+
+This causes Codex to set the terminal title with status and project name, which vterm reflects in the buffer name. The provider maps these to dashboard statuses:
+
+| Terminal title keyword | Dashboard status |
+|------------------------|------------------|
+| Ready                  | `IDLE`           |
+| Working                | `BUSY`           |
+| Action Required        | `ASKING`         |
+
+Without this configuration, Codex sessions will appear as `RUNNING` with no title.
 
 ### Cursor provider (experimental)
 
 To enable, add `cursor` to `vterm-ai-enabled-providers`.
 
-This provider detects `cursor-agent` processes and extracts session status from vterm buffer names. It requires Cursor's **status-indicators** setting to be enabled:
+This provider detects `cursor-agent` processes and extracts status and title from vterm buffer names.
 
-1. Open Cursor Settings
-2. Search for `status-indicators`
-3. Enable the option
+#### Cursor side configuration
 
-When enabled, Cursor sets the terminal title to include status keywords (`Ready`, `Working`, `Waiting for you`), which vterm reflects in the buffer name. The provider maps these to dashboard statuses:
+Add the following to `~/.cursor/cli-config.json`:
+
+```json
+{
+  "display": {
+    "showStatusIndicators": true
+  }
+}
+```
+
+This causes Cursor to set the terminal title with status keywords, which vterm reflects in the buffer name. The provider maps these to dashboard statuses:
 
 | Terminal title keyword | Dashboard status |
 |------------------------|------------------|
@@ -121,7 +148,7 @@ When enabled, Cursor sets the terminal title to include status keywords (`Ready`
 | Working                | `BUSY`           |
 | Waiting for you        | `ASKING`         |
 
-Without the `status-indicators` setting, Cursor sessions will appear as `RUNNING` (process detected but status unknown).
+Without this configuration, Cursor sessions will appear as `RUNNING` with no title.
 
 ## License
 

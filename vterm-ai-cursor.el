@@ -69,7 +69,8 @@ Return (status . title) or nil if not a Cursor status-indicator name."
           (let ((title (cdr parsed)))
             (when (string-match "\\`vterm: \\(.+\\)" title)
               (setq title (match-string 1 title)))
-            (setf (vterm-ai-session-title session) title)))))))
+            (setf (vterm-ai-session-title session) title))))))
+  (setf (vterm-ai-session-last-prompt session) "(not available)"))
 
 ;;; --- Detail ---
 

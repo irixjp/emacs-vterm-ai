@@ -45,35 +45,56 @@ Return the process object for cancellation management."
            (when (buffer-live-p (process-buffer proc))
              (kill-buffer (process-buffer proc)))))))))
 
+;;; --- Status from vterm buffer name ---
+
+(defun vterm-ai-codex--parse-buffer-name (name)
+  "Parse vterm buffer NAME for Codex status and project name.
+Return (status . project) or nil."
+  (let ((stripped (if (string-match "\\`vterm: \\(.+\\)" name)
+                      (match-string 1 name)
+                    name)))
+    (cond
+     ((string-match "Action Required | .+ | \\(.+\\)" stripped)
+      (cons "waiting" (string-trim (match-string 1 stripped))))
+     ((string-match "Working | \\(.+\\)" stripped)
+      (cons "busy" (string-trim (match-string 1 stripped))))
+     ((string-match "Ready | \\(.+\\)" stripped)
+      (cons "idle" (string-trim (match-string 1 stripped))))
+     (t nil))))
+
 ;;; --- Enrich via SQLite ---
 
 (defvar vterm-ai-codex--enrich-cache (make-hash-table :test 'equal)
-  "Cache keyed by cwd.  Values: (mtime title model prompt).")
+  "Cache keyed by cwd.  Values: (mtime session-id model).")
 
 (defun vterm-ai-codex--query-thread (cwd)
   "Query the Codex SQLite database for the most recent thread matching CWD.
-Return an alist with title, model, and first-user-message, or nil."
+Return an alist with session-id and model, or nil."
   (when (file-readable-p vterm-ai-codex--db-path)
     (with-temp-buffer
       (let ((ret (call-process
                   "sqlite3" nil t nil
                   "-separator" "\t"
                   vterm-ai-codex--db-path
-                  (format "SELECT id, title, model, substr(first_user_message, 1, 500) FROM threads WHERE cwd = '%s' AND archived = 0 ORDER BY updated_at DESC LIMIT 1;"
+                  (format "SELECT id, model FROM threads WHERE cwd = '%s' AND archived = 0 ORDER BY updated_at DESC LIMIT 1;"
                           (replace-regexp-in-string "'" "''" cwd)))))
         (when (and (zerop ret) (> (buffer-size) 0))
           (goto-char (point-min))
           (let ((parts (split-string (buffer-substring-no-properties
                                       (point) (line-end-position))
                                      "\t")))
-            (when (>= (length parts) 4)
+            (when (>= (length parts) 2)
               `((session-id . ,(nth 0 parts))
-                (title . ,(nth 1 parts))
-                (model . ,(nth 2 parts))
-                (prompt . ,(nth 3 parts))))))))))
+                (model . ,(nth 1 parts))))))))))
 
 (defun vterm-ai-codex-enrich (session)
-  "Enrich SESSION with title, model, and last-prompt from Codex SQLite."
+  "Enrich SESSION with status/title from buffer name and model from SQLite."
+  (let ((buf (vterm-ai-session-vterm-buffer session)))
+    (when (and buf (buffer-live-p buf))
+      (let ((parsed (vterm-ai-codex--parse-buffer-name (buffer-name buf))))
+        (when parsed
+          (setf (vterm-ai-session-status session) (car parsed))
+          (setf (vterm-ai-session-title session) (cdr parsed))))))
   (when (file-readable-p vterm-ai-codex--db-path)
     (let* ((cwd (vterm-ai-session-cwd session))
            (mtime (file-attribute-modification-time
@@ -82,34 +103,28 @@ Return an alist with title, model, and first-user-message, or nil."
       (if (and cached (equal (car cached) mtime))
           (let ((data (cdr cached)))
             (setf (vterm-ai-session-session-id session) (nth 0 data))
-            (setf (vterm-ai-session-title session) (nth 1 data))
-            (setf (vterm-ai-session-model session) (nth 2 data))
-            (setf (vterm-ai-session-last-prompt session) (nth 3 data)))
+            (setf (vterm-ai-session-model session) (nth 1 data)))
         (let ((info (vterm-ai-codex--query-thread cwd)))
           (when info
             (let ((sid (alist-get 'session-id info))
-                  (title (or (alist-get 'title info) ""))
-                  (model (or (alist-get 'model info) ""))
-                  (prompt (or (alist-get 'prompt info) "")))
+                  (model (or (alist-get 'model info) "")))
               (setf (vterm-ai-session-session-id session) sid)
-              (setf (vterm-ai-session-title session) title)
               (setf (vterm-ai-session-model session) model)
-              (setf (vterm-ai-session-last-prompt session) prompt)
-              (puthash cwd (cons mtime (list sid title model prompt))
-                       vterm-ai-codex--enrich-cache))))))))
+              (puthash cwd (cons mtime (list sid model))
+                       vterm-ai-codex--enrich-cache)))))))
+  (setf (vterm-ai-session-last-prompt session) "(not available)"))
 
 ;;; --- Detail ---
 
 (defun vterm-ai-codex-detail (session)
   "Return a detailed string for SESSION."
-  (format "Session: %s\nStatus:  %s\nCWD:     %s\nTitle:   %s\nModel:   %s\nPID:     %d\n\n--- Last Prompt ---\n\n%s\n"
+  (format "Session: %s\nStatus:  %s\nCWD:     %s\nTitle:   %s\nModel:   %s\nPID:     %d\n"
           (or (vterm-ai-session-name session) "codex")
           (or (vterm-ai-session-status session) "unknown")
           (or (vterm-ai-session-cwd session) "N/A")
           (or (vterm-ai-session-title session) "N/A")
           (or (vterm-ai-session-model session) "N/A")
-          (vterm-ai-session-pid session)
-          (or (vterm-ai-session-last-prompt session) "(none)")))
+          (vterm-ai-session-pid session)))
 
 ;;; --- Auto-register ---
 
