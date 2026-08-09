@@ -23,6 +23,7 @@ It periodically collects session information and displays status, model, working
 - [vterm](https://github.com/akermu/emacs-libvterm)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (for the Claude provider)
 - [Codex](https://openai.com/index/introducing-codex/) CLI (for the Codex provider, experimental — see below)
+- [Cursor](https://www.cursor.com/) CLI (for the Cursor provider, experimental — see below)
 
 ## Installation
 
@@ -39,7 +40,7 @@ Add the package directory to your `load-path` and require it:
 M-x vterm-ai
 ```
 
-This opens the `*vterm-ai*` dashboard buffer, which auto-refreshes every 10 seconds.
+This opens the `*vterm-ai*` dashboard buffer, which auto-refreshes every 30 seconds.
 
 ### Keybindings
 
@@ -57,7 +58,11 @@ This opens the `*vterm-ai*` dashboard buffer, which auto-refreshes every 10 seco
 ### Configuration
 
 ```emacs-lisp
-(setq vterm-ai-refresh-interval 10)  ;; seconds (default: 10)
+;; Providers to enable (default: '(claude))
+(setq vterm-ai-enabled-providers '(claude cursor))
+
+;; Dashboard refresh interval in seconds (default: 30)
+(setq vterm-ai-refresh-interval 30)
 ```
 
 ## Architecture
@@ -72,6 +77,8 @@ vterm-ai-claude.el     Claude Code provider: async session discovery
                        parsing for title / model / last prompt
 vterm-ai-codex.el      Codex provider: process detection via ps/lsof,
                        session info from ~/.codex/state_5.sqlite
+vterm-ai-cursor.el     Cursor provider: process detection via ps/lsof,
+                       status extraction from vterm buffer names
 vterm-ai-dashboard.el  Dashboard UI rendering and keybindings
 ```
 
@@ -92,13 +99,29 @@ To add support for a new agent (e.g. Cursor), create a new file that implements 
 
 ### Codex provider (experimental)
 
-The Codex provider is disabled by default. To enable it:
-
-```emacs-lisp
-(setq vterm-ai-enable-codex t)
-```
+To enable, add `codex` to `vterm-ai-enabled-providers`.
 
 Codex does not expose an API for querying session state (idle/busy/asking), so all Codex sessions are displayed as `RUNNING` (process active, state unknown). If Codex adds a status API in the future, [...]
+
+### Cursor provider (experimental)
+
+To enable, add `cursor` to `vterm-ai-enabled-providers`.
+
+This provider detects `cursor-agent` processes and extracts session status from vterm buffer names. It requires Cursor's **status-indicators** setting to be enabled:
+
+1. Open Cursor Settings
+2. Search for `status-indicators`
+3. Enable the option
+
+When enabled, Cursor sets the terminal title to include status keywords (`Ready`, `Working`, `Waiting for you`), which vterm reflects in the buffer name. The provider maps these to dashboard statuses:
+
+| Terminal title keyword | Dashboard status |
+|------------------------|------------------|
+| Ready                  | `IDLE`           |
+| Working                | `BUSY`           |
+| Waiting for you        | `ASKING`         |
+
+Without the `status-indicators` setting, Cursor sessions will appear as `RUNNING` (process detected but status unknown).
 
 ## License
 

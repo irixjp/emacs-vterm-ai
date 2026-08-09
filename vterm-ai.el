@@ -16,7 +16,6 @@
 ;;; Code:
 
 (require 'vterm-ai-data)
-(require 'vterm-ai-claude)
 (require 'vterm-ai-dashboard)
 
 (defgroup vterm-ai nil
@@ -24,15 +23,16 @@
   :group 'tools
   :prefix "vterm-ai-")
 
-(defcustom vterm-ai-enable-codex nil
-  "When non-nil, enable the Codex provider (experimental)."
-  :type 'boolean
+(defcustom vterm-ai-enabled-providers '(claude)
+  "List of providers to enable.
+Available providers: claude, codex, cursor."
+  :type '(repeat (choice (const claude) (const codex) (const cursor)))
   :group 'vterm-ai)
 
-(when vterm-ai-enable-codex
-  (require 'vterm-ai-codex))
+(dolist (provider vterm-ai-enabled-providers)
+  (require (intern (format "vterm-ai-%s" provider))))
 
-(defcustom vterm-ai-refresh-interval 10
+(defcustom vterm-ai-refresh-interval 30
   "Refresh interval in seconds for the dashboard."
   :type 'integer
   :group 'vterm-ai)

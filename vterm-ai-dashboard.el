@@ -8,6 +8,8 @@
 (require 'cl-lib)
 (require 'vterm-ai-data)
 
+(defvar vterm-ai-refresh-interval)
+
 (defface vterm-ai-status-busy
   '((t :foreground "orange" :weight bold))
   "Face for busy agent instances."
@@ -186,13 +188,14 @@ WIDTH is the available window width."
                        sessions))
         (count-total (length sessions)))
     (setq header-line-format
-          (if (> count-asking 0)
-              (format " AI Sessions: %d total | %d busy | %d idle | %s"
-                      count-total count-busy count-idle
-                      (propertize (format "%d ASKING" count-asking)
-                                  'face 'vterm-ai-status-asking))
-            (format " AI Sessions: %d total | %d busy | %d idle"
-                    count-total count-busy count-idle)))))
+          (let ((base (if (> count-asking 0)
+                          (format " AI Sessions: %d total | %d busy | %d idle | %s"
+                                  count-total count-busy count-idle
+                                  (propertize (format "%d ASKING" count-asking)
+                                              'face 'vterm-ai-status-asking))
+                        (format " AI Sessions: %d total | %d busy | %d idle"
+                                count-total count-busy count-idle))))
+            (format "%s  [%ds]" base vterm-ai-refresh-interval)))))
 
 (defun vterm-ai-dashboard--refresh ()
   "Refresh dashboard data asynchronously."
