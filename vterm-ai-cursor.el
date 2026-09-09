@@ -64,7 +64,12 @@ Return (status . title) or nil if not a Cursor status-indicator name."
 ;;; --- Chat index: CWD -> latest chat mapping ---
 
 (defvar vterm-ai-cursor--chat-index nil
-  "Hash table CWD -> (chat-dir title updated-at-ms).")
+  "Hash table CWD -> (chat-dir title activity-mtime).
+Stores the most recently active chat per CWD.")
+
+(defvar vterm-ai-cursor--chat-title-index (make-hash-table :test 'equal)
+  "Hash table \"CWD\\ttitle\" -> (chat-dir title activity-mtime).
+Stores chats keyed by CWD + title for exact matching.")
 
 (defvar vterm-ai-cursor--chat-index-time nil
   "Time when chat-index was last built.")
@@ -79,11 +84,12 @@ Prefers prompt_history.json (actual user input), falls back to meta.json."
        (file-attributes (expand-file-name "meta.json" chat-dir))))))
 
 (defun vterm-ai-cursor--build-chat-index ()
-  "Scan meta.json files to build CWD -> latest-chat mapping.
-For each CWD, keeps the chat with the most recently modified
-prompt_history.json (or meta.json as fallback)."
+  "Scan meta.json files to build chat indexes.
+Builds two indexes: by-cwd (newest by activity mtime) and
+by-title (CWD+title for exact matching via buffer name)."
   (let ((chats-dir (expand-file-name "chats" vterm-ai-cursor--config-dir))
-        (index (make-hash-table :test 'equal)))
+        (by-cwd (make-hash-table :test 'equal))
+        (by-title (make-hash-table :test 'equal)))
     (when (file-directory-p chats-dir)
       (dolist (ws-dir (directory-files chats-dir t "\\`[^.]"))
         (when (file-directory-p ws-dir)
@@ -100,27 +106,40 @@ prompt_history.json (or meta.json as fallback)."
                              (cwd (alist-get 'cwd meta))
                              (title (alist-get 'title meta))
                              (is-sub (eq (alist-get 'isSubagent meta) t))
-                             (act-mt (vterm-ai-cursor--activity-mtime chat-dir)))
+                             (act-mt (vterm-ai-cursor--activity-mtime chat-dir))
+                             (entry (list chat-dir title act-mt)))
                         (when (and cwd (not is-sub))
-                          (let ((existing (gethash cwd index)))
+                          (let ((existing (gethash cwd by-cwd)))
                             (when (or (not existing)
                                       (time-less-p (nth 2 existing) act-mt))
-                              (puthash cwd (list chat-dir title act-mt)
-                                       index)))))
+                              (puthash cwd entry by-cwd)))
+                          (when (and title (not (string-empty-p title)))
+                            (puthash (concat cwd "\t" title) entry
+                                     by-title))))
                     (error nil)))))))))
-    (setq vterm-ai-cursor--chat-index index
+    (setq vterm-ai-cursor--chat-index by-cwd
+          vterm-ai-cursor--chat-title-index by-title
           vterm-ai-cursor--chat-index-time (current-time))))
 
-(defun vterm-ai-cursor--get-chat-for-cwd (cwd)
-  "Return (chat-dir title updated-at-ms) for CWD, or nil.
-Rebuilds the index if older than 60 seconds."
+(defun vterm-ai-cursor--ensure-index ()
+  "Rebuild the chat index if older than 60 seconds."
   (unless (and vterm-ai-cursor--chat-index
+               (hash-table-p vterm-ai-cursor--chat-title-index)
                vterm-ai-cursor--chat-index-time
                (< (float-time (time-subtract (current-time)
                                              vterm-ai-cursor--chat-index-time))
                   60))
-    (vterm-ai-cursor--build-chat-index))
-  (gethash cwd vterm-ai-cursor--chat-index))
+    (vterm-ai-cursor--build-chat-index)))
+
+(defun vterm-ai-cursor--get-chat-for-cwd (cwd &optional buf-title)
+  "Return (chat-dir title activity-mtime) for CWD, or nil.
+When BUF-TITLE is non-nil, try exact CWD+title match first.
+Falls back to the most recently active chat for CWD."
+  (vterm-ai-cursor--ensure-index)
+  (or (when (and buf-title (not (string-empty-p buf-title)))
+        (gethash (concat cwd "\t" buf-title)
+                 vterm-ai-cursor--chat-title-index))
+      (gethash cwd vterm-ai-cursor--chat-index)))
 
 ;;; --- Hex decode for store.db ---
 
@@ -156,7 +175,7 @@ Return alist with model and mode, or nil."
                        (run-everything (eq (alist-get 'isRunEverything data) t))
                        (model (or (alist-get 'lastUsedModel data) "")))
                   `((model . ,model)
-                    (mode . ,(if run-everything "bypassPermissions" ""))))
+                    (mode . ,(if run-everything "bypassPermissions" "default"))))
               (error nil))))))))
 
 ;;; --- Prompt history reader ---
@@ -203,10 +222,22 @@ Return a list of strings, or nil."
             (setf (vterm-ai-session-status session) (car parsed))
             (setq buf-title (cdr parsed))
             (when (string-match "\\`vterm: \\(.+\\)" buf-title)
+              (setq buf-title (match-string 1 buf-title)))
+            (when (string-match "\\`#[0-9]+ \\(.+\\)" buf-title)
               (setq buf-title (match-string 1 buf-title)))))))
     ;; Rich data from Cursor chat files
     (let* ((cwd (vterm-ai-session-cwd session))
-           (chat-info (when cwd (vterm-ai-cursor--get-chat-for-cwd cwd))))
+           ;; Strip " - <dirname>..." suffix from buf-title to get clean title
+           (clean-title
+            (when buf-title
+              (let ((dir-name (file-name-nondirectory
+                               (directory-file-name (or cwd "")))))
+                (if (and (not (string-empty-p dir-name))
+                         (string-match (concat " - " (regexp-quote dir-name))
+                                       buf-title))
+                    (substring buf-title 0 (match-beginning 0))
+                  buf-title))))
+           (chat-info (when cwd (vterm-ai-cursor--get-chat-for-cwd cwd clean-title))))
       (if chat-info
           (let* ((chat-dir (nth 0 chat-info))
                  (chat-uuid (file-name-nondirectory chat-dir))
@@ -223,8 +254,7 @@ Return a list of strings, or nil."
                      (store-meta (vterm-ai-cursor--read-store-meta chat-dir))
                      (model (or (alist-get 'model store-meta) ""))
                      (mode (or (alist-get 'mode store-meta) ""))
-                     (prompts (vterm-ai-cursor--read-prompts chat-dir))
-                     (last-prompt (or (car (last prompts)) "")))
+                     (last-prompt "(not available)"))
                 (setf (vterm-ai-session-title session) title)
                 (setf (vterm-ai-session-model session) model)
                 (setf (vterm-ai-session-mode session) mode)
@@ -241,7 +271,8 @@ Return a list of strings, or nil."
 (defun vterm-ai-cursor-detail (session)
   "Return a detailed string for SESSION with recent prompts."
   (let* ((cwd (vterm-ai-session-cwd session))
-         (chat-info (when cwd (vterm-ai-cursor--get-chat-for-cwd cwd)))
+         (title (vterm-ai-session-title session))
+         (chat-info (when cwd (vterm-ai-cursor--get-chat-for-cwd cwd title)))
          (chat-dir (and chat-info (nth 0 chat-info)))
          (prompts (when chat-dir (vterm-ai-cursor--read-prompts chat-dir))))
     (with-temp-buffer
@@ -250,6 +281,7 @@ Return a list of strings, or nil."
       (insert (format "CWD:     %s\n" (or cwd "N/A")))
       (insert (format "Title:   %s\n" (or (vterm-ai-session-title session) "N/A")))
       (insert (format "Model:   %s\n" (or (vterm-ai-session-model session) "N/A")))
+      (insert (format "Mode:    %s\n" (or (vterm-ai-session-mode session) "N/A")))
       (insert (format "PID:     %d\n" (vterm-ai-session-pid session)))
       (insert "\n--- Recent Prompts ---\n\n")
       (if prompts
