@@ -140,8 +140,12 @@ Stale results from killed processes are discarded via generation check."
                               (when (zerop pending)
                                 (vterm-ai-data--finalize
                                  all-results my-gen callback)))))))
-            (when (processp proc)
-              (push proc vterm-ai-data--collect-processes))))))))
+            (cond
+             ((processp proc) (push proc vterm-ai-data--collect-processes))
+             ((listp proc)
+              (dolist (p proc)
+                (when (processp p)
+                  (push p vterm-ai-data--collect-processes)))))))))))
 
 (defun vterm-ai-data--finalize (all-results my-gen callback)
   "Build sessions from ALL-RESULTS and call CALLBACK.

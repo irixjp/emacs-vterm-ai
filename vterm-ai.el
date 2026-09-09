@@ -29,18 +29,21 @@ Available providers: claude, codex, cursor."
   :type '(repeat (choice (const claude) (const codex) (const cursor)))
   :group 'vterm-ai)
 
-(dolist (provider vterm-ai-enabled-providers)
-  (require (intern (format "vterm-ai-%s" provider))))
-
 (defcustom vterm-ai-refresh-interval 30
   "Refresh interval in seconds for the dashboard."
   :type 'integer
   :group 'vterm-ai)
 
+(defun vterm-ai--load-providers ()
+  "Load provider modules listed in `vterm-ai-enabled-providers'."
+  (dolist (provider vterm-ai-enabled-providers)
+    (require (intern (format "vterm-ai-%s" provider)))))
+
 ;;;###autoload
 (defun vterm-ai ()
   "Open the vterm-ai dashboard."
   (interactive)
+  (vterm-ai--load-providers)
   (let ((buf (get-buffer-create "*vterm-ai*")))
     (with-current-buffer buf
       (unless (eq major-mode 'vterm-ai-dashboard-mode)

@@ -65,6 +65,20 @@ This opens the `*vterm-ai*` dashboard buffer, which auto-refreshes every 30 seco
 (setq vterm-ai-refresh-interval 30)
 ```
 
+#### Multiple Claude config directories
+
+If you launch Claude Code with different `CLAUDE_CONFIG_DIR` values (e.g.
+via separate shell aliases for different accounts/providers), list every
+directory so the Claude provider can discover sessions and transcripts
+from all of them:
+
+```emacs-lisp
+(setq vterm-ai-claude-config-dirs
+      (list "~/.claude_work" "~/.claude_personal"))
+```
+
+Defaults to `~/.claude` (or `$CLAUDE_CONFIG_DIR` if set).
+
 ## Architecture
 
 ```

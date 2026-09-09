@@ -7,19 +7,46 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'json)
 (require 'vterm-ai-data)
 
 (defvar vterm-ai-claude--dir
-  (expand-file-name ".claude" (getenv "HOME")))
+  (or (getenv "CLAUDE_CONFIG_DIR")
+      (expand-file-name ".claude" (getenv "HOME")))
+  "Legacy single Claude config directory.
+Superseded by `vterm-ai-claude-config-dirs'; kept as its default value.")
+
+(defcustom vterm-ai-claude-config-dirs
+  (list vterm-ai-claude--dir)
+  "List of Claude Code config directories to query.
+
+Each entry corresponds to a value that could be passed via the
+`CLAUDE_CONFIG_DIR' environment variable when launching `claude'
+\(for example via separate shell aliases for different accounts
+or providers).  vterm-ai runs `claude agents --json' once per
+directory and merges the results, and looks up transcripts in
+whichever directory actually contains them.
+
+If you only ever use the default `~/.claude' directory (or a
+single `CLAUDE_CONFIG_DIR'), leave this at its default.  If you
+use several, list them all, e.g.:
+
+  (setq vterm-ai-claude-config-dirs
+        (list \"~/.claude_work\" \"~/.claude_personal\"))"
+  :type '(repeat directory)
+  :group 'vterm-ai)
 
 ;;; --- Async session discovery ---
 
-(defun vterm-ai-claude--get-sessions-async (callback)
-  "Run `claude agents --json' asynchronously.
+(defun vterm-ai-claude--get-sessions-one (dir callback)
+  "Run `claude agents --json' with `CLAUDE_CONFIG_DIR' set to DIR.
 Call CALLBACK with a list of alists on completion.
 Return the process object for cancellation management."
-  (let ((buf (generate-new-buffer " *vterm-ai-claude*")))
+  (let* ((buf (generate-new-buffer " *vterm-ai-claude*"))
+         (process-environment
+          (cons (format "CLAUDE_CONFIG_DIR=%s" (expand-file-name dir))
+                process-environment)))
     (make-process
      :name "vterm-ai-claude-agents"
      :buffer buf
@@ -43,15 +70,44 @@ Return the process object for cancellation management."
            (when (buffer-live-p (process-buffer proc))
              (kill-buffer (process-buffer proc)))))))))
 
+(defun vterm-ai-claude--get-sessions-async (callback)
+  "Run `claude agents --json' once per `vterm-ai-claude-config-dirs'.
+Merge the results and call CALLBACK with the combined list of alists.
+Return a list of process objects for cancellation management."
+  (let* ((dirs (or vterm-ai-claude-config-dirs (list vterm-ai-claude--dir)))
+         (pending (length dirs))
+         (all nil))
+    (if (zerop pending)
+        (progn (funcall callback nil) nil)
+      (mapcar
+       (lambda (dir)
+         (vterm-ai-claude--get-sessions-one
+          dir
+          (lambda (agents)
+            (setq all (append all agents))
+            (cl-decf pending)
+            (when (zerop pending)
+              (funcall callback all)))))
+       dirs))))
+
 ;;; --- Transcript helpers ---
 
 (defun vterm-ai-claude--transcript-path (cwd session-id)
-  "Derive transcript JSONL path from CWD and SESSION-ID."
-  (let ((escaped (concat "-" (substring (replace-regexp-in-string "/" "-" cwd) 1))))
-    (expand-file-name (concat session-id ".jsonl")
-                      (expand-file-name escaped
-                                        (expand-file-name "projects"
-                                                          vterm-ai-claude--dir)))))
+  "Derive transcript JSONL path from CWD and SESSION-ID.
+Searches each directory in `vterm-ai-claude-config-dirs' and returns
+the first path where the file actually exists, falling back to the
+path under the first configured directory if none match."
+  (let* ((escaped (concat "-" (substring (replace-regexp-in-string "/" "-" cwd) 1)))
+         (dirs (or vterm-ai-claude-config-dirs (list vterm-ai-claude--dir)))
+         (candidates
+          (mapcar (lambda (dir)
+                    (expand-file-name (concat session-id ".jsonl")
+                                      (expand-file-name escaped
+                                                        (expand-file-name "projects"
+                                                                          (expand-file-name dir)))))
+                  dirs)))
+    (or (cl-find-if #'file-readable-p candidates)
+        (car candidates))))
 
 (defun vterm-ai-claude--read-tail (file &optional bytes)
   "Read the last BYTES (default 16384) of FILE as parsed JSON lines.

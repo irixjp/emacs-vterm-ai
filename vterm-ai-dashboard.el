@@ -109,7 +109,7 @@ WIDTH is the available window width."
          (prompt (or (vterm-ai-session-last-prompt session) ""))
          (prompt-clean (replace-regexp-in-string "[\n\r]+" " " prompt))
          (prompt-indent (make-string (length "Prompt: ") ?\s))
-         (text-width (max 40 (- width (length prompt-indent) 2)))
+         (text-width (max 1 (- width (length prompt-indent) 2)))
          (start (point)))
     ;; Line 1: [STATUS] type: title
     (insert (propertize (format "[%s]" (vterm-ai-dashboard--status-text status))
@@ -147,10 +147,12 @@ WIDTH is the available window width."
 
 (defun vterm-ai-dashboard--render (sessions)
   "Render all SESSIONS into the current buffer."
-  (let ((inhibit-read-only t)
-        (saved-session (vterm-ai-dashboard--session-at-point))
-        (saved-line (line-number-at-pos))
-        (width (max 80 (window-width))))
+  (let* ((inhibit-read-only t)
+         (saved-session (vterm-ai-dashboard--session-at-point))
+         (saved-line (line-number-at-pos))
+         (win (or (get-buffer-window (current-buffer)) (selected-window)))
+         (width (window-width win))
+         (sep-width (max 1 (min width 80))))
     (erase-buffer)
     (if (null sessions)
         (insert (propertize "No active AI agent sessions found.\n"
@@ -159,7 +161,7 @@ WIDTH is the available window width."
         (dolist (session sessions)
           (if first
               (setq first nil)
-            (insert (propertize (make-string (min width 80) ?─)
+            (insert (propertize (make-string sep-width ?─)
                                 'face 'vterm-ai-separator)
                     "\n"))
           (vterm-ai-dashboard--render-session session width))))
@@ -207,6 +209,13 @@ WIDTH is the available window width."
            (setq vterm-ai-dashboard--sessions sessions)
            (vterm-ai-dashboard--render sessions)
            (vterm-ai-dashboard--update-header sessions)))))))
+
+(defun vterm-ai-dashboard--relayout ()
+  "Re-render the last collected sessions without re-collecting data.
+Used to keep the layout (e.g. separator width) in sync with the
+current window width when it changes."
+  (vterm-ai-dashboard--render vterm-ai-dashboard--sessions)
+  (vterm-ai-dashboard--update-header vterm-ai-dashboard--sessions))
 
 (defun vterm-ai-dashboard--refresh-if-alive ()
   "Refresh dashboard if the buffer still exists."
@@ -332,7 +341,9 @@ WIDTH is the available window width."
   (setq-local revert-buffer-function
               (lambda (_ignore-auto _noconfirm)
                 (vterm-ai-dashboard--refresh)))
-  (add-hook 'kill-buffer-hook #'vterm-ai-dashboard--stop-timer nil t))
+  (add-hook 'kill-buffer-hook #'vterm-ai-dashboard--stop-timer nil t)
+  (add-hook 'window-configuration-change-hook
+            #'vterm-ai-dashboard--relayout nil t))
 
 (provide 'vterm-ai-dashboard)
 ;;; vterm-ai-dashboard.el ends here
