@@ -97,7 +97,7 @@ Return a list of process objects for cancellation management."
 Searches each directory in `vterm-ai-claude-config-dirs' and returns
 the first path where the file actually exists, falling back to the
 path under the first configured directory if none match."
-  (let* ((escaped (concat "-" (substring (replace-regexp-in-string "/" "-" cwd) 1)))
+  (let* ((escaped (replace-regexp-in-string "[^[:alnum:]]" "-" cwd))
          (dirs (or vterm-ai-claude-config-dirs (list vterm-ai-claude--dir)))
          (candidates
           (mapcar (lambda (dir)
