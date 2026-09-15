@@ -216,35 +216,40 @@ ORDER BY m.time_created DESC, p.time_created ASC LIMIT %d;"
 
 ;;; --- Live status (from the vterm-ai-status plugin) ---
 
-(defun vterm-ai-opencode--status-file (cwd)
-  "Return the vterm-ai-status plugin's status file path for CWD.
-The sanitization here must match the plugin's `sanitize' function
+(defun vterm-ai-opencode--status-file (cwd pid)
+  "Return the vterm-ai-status plugin's status file path for CWD and PID.
+The pid is part of the filename (not just a field inside it) so that
+two OpenCode processes running in the same directory at once -- e.g.
+two terminals both cd'd into the same project -- each get their own
+file instead of racing to overwrite one shared file.  The sanitization
+here must match the plugin's `sanitize' function
 \(opencode-plugin/vterm-ai-status.js) exactly, or the two sides will
 look for different filenames."
   (expand-file-name
-   (concat (replace-regexp-in-string "[^a-zA-Z0-9]" "-" cwd) ".json")
+   (format "%s-%d.json" (replace-regexp-in-string "[^a-zA-Z0-9]" "-" cwd) pid)
    vterm-ai-opencode-status-dir))
 
 (defun vterm-ai-opencode--live-status (cwd pid)
-  "Return the live status ATOM (\"idle\"/\"busy\"/\"waiting\") for CWD,
-as last written by the vterm-ai-status OpenCode plugin, or nil if
-unavailable.  Only trusted when the file's recorded pid matches PID,
-the OpenCode process actually running this session right now -- this
-avoids using a stale file left behind by a previous, now-dead process
-that used to run in the same directory."
-  (let ((file (vterm-ai-opencode--status-file cwd)))
-    (when (file-readable-p file)
-      (condition-case nil
-          (let* ((data (json-parse-string
-                        (with-temp-buffer
-                          (insert-file-contents file)
-                          (buffer-string))
-                        :object-type 'alist))
-                 (file-pid (alist-get 'pid data))
-                 (status (alist-get 'status data)))
-            (when (and status pid file-pid (= file-pid pid))
-              status))
-        (error nil)))))
+  "Return the live status ATOM (\"idle\"/\"busy\"/\"waiting\") for the
+OpenCode process PID running in CWD, as last written by the
+vterm-ai-status OpenCode plugin, or nil if unavailable (e.g. the
+plugin isn't installed, or hasn't written anything for this process
+yet).  The recorded pid inside the file is double-checked against PID
+as well, purely defensively."
+  (when pid
+    (let ((file (vterm-ai-opencode--status-file cwd pid)))
+      (when (file-readable-p file)
+        (condition-case nil
+            (let* ((data (json-parse-string
+                          (with-temp-buffer
+                            (insert-file-contents file)
+                            (buffer-string))
+                          :object-type 'alist))
+                   (file-pid (alist-get 'pid data))
+                   (status (alist-get 'status data)))
+              (when (and status file-pid (= file-pid pid))
+                status))
+          (error nil))))))
 
 ;;; --- Enrich cache ---
 

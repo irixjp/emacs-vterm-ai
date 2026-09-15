@@ -13,7 +13,7 @@
 // process itself.
 //
 // This plugin hooks OpenCode's internal event bus and writes a small
-// per-directory JSON file every time the session's busy/idle status
+// per-process JSON file every time the session's busy/idle status
 // changes, or a permission request is opened/resolved. vterm-ai's
 // OpenCode provider (vterm-ai-opencode.el) reads this file and uses it
 // to fill the gap the database and terminal title can't cover.
@@ -24,16 +24,24 @@
 //   Or from Emacs: M-x vterm-ai-opencode-install-plugin
 //
 // Status file:
-//   ~/.local/share/opencode/vterm-ai-status/<sanitized-directory>.json
+//   ~/.local/share/opencode/vterm-ai-status/<sanitized-directory>-<pid>.json
 //   { "status": "idle" | "busy" | "waiting", "directory": "...",
 //     "pid": <opencode process pid>, "updated": <epoch ms> }
 //
-// The "pid" field lets the Emacs side distinguish a live status from a
-// stale leftover of a previous OpenCode process that used to run in the
-// same directory (e.g. if this plugin's process got killed before it
-// could clean up).
+// The pid is part of the filename (not just a field inside it) so that
+// two OpenCode processes running in the same directory at the same
+// time -- e.g. two terminals both cd'd into the same project -- each
+// get their own file instead of racing to overwrite one shared file.
+// vterm-ai-opencode.el looks up the file for the exact pid of the
+// process it is currently tracking, so this fully avoids that race
+// (see vterm-ai-opencode--status-file).
+//
+// Files are only ever added, never actively removed on exit (plugins
+// have no shutdown hook to do that in), so each process also sweeps
+// its own directory's old files for pids that are no longer running,
+// on startup.
 
-import { writeFileSync, mkdirSync } from "fs"
+import { writeFileSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from "fs"
 import { homedir } from "os"
 import path from "path"
 
@@ -46,16 +54,53 @@ function sanitize(directory) {
   return directory.replace(/[^a-zA-Z0-9]/g, "-")
 }
 
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (e) {
+    // EPERM means the process exists but belongs to another user --
+    // still alive, just not signalable by us. Anything else (ESRCH,
+    // etc.) means it's gone.
+    return e && e.code === "EPERM"
+  }
+}
+
+// Remove stale files left behind by previous, now-dead OpenCode
+// processes that ran in this same directory. Best-effort only: any
+// failure here just means a harmless leftover file remains (the pid
+// mismatch on the Emacs side already makes stale files inert).
+function cleanupStale(dirPrefix, ownFile) {
+  try {
+    for (const f of readdirSync(STATUS_DIR)) {
+      if (f === ownFile || !f.startsWith(dirPrefix + "-") || !f.endsWith(".json")) continue
+      const full = path.join(STATUS_DIR, f)
+      try {
+        const data = JSON.parse(readFileSync(full, "utf8"))
+        if (!data.pid || !isAlive(data.pid)) unlinkSync(full)
+      } catch (e) {
+        unlinkSync(full) // Corrupt/unreadable -- just remove it.
+      }
+    }
+  } catch (e) {
+    // STATUS_DIR unreadable (e.g. doesn't exist yet); nothing to clean.
+  }
+}
+
 export const VtermAiStatusPlugin = async (ctx) => {
   let statusFile
+  let dirPrefix
   try {
     mkdirSync(STATUS_DIR, { recursive: true })
-    statusFile = path.join(STATUS_DIR, sanitize(ctx.directory) + ".json")
+    dirPrefix = sanitize(ctx.directory)
+    statusFile = path.join(STATUS_DIR, `${dirPrefix}-${process.pid}.json`)
   } catch (e) {
     // If we can't create the status directory, silently do nothing
     // rather than breaking the host OpenCode process.
     return {}
   }
+
+  cleanupStale(dirPrefix, path.basename(statusFile))
 
   let baseStatus = "idle"
   let asking = false
