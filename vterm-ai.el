@@ -25,8 +25,8 @@
 
 (defcustom vterm-ai-enabled-providers '(claude)
   "List of providers to enable.
-Available providers: claude, codex, cursor."
-  :type '(repeat (choice (const claude) (const codex) (const cursor)))
+Available providers: claude, codex, cursor, opencode."
+  :type '(repeat (choice (const claude) (const codex) (const cursor) (const opencode)))
   :group 'vterm-ai)
 
 (defcustom vterm-ai-refresh-interval 30
