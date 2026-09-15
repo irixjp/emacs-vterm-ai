@@ -86,7 +86,7 @@
 (defun vterm-ai-dashboard--mode-display (mode)
   "Return display string for permission MODE."
   (cond
-   ((or (null mode) (string-empty-p mode)) nil)
+   ((or (not (stringp mode)) (string-empty-p mode)) nil)
    ((equal mode "plan") "Plan")
    ((equal mode "acceptEdits") "Accept Edits")
    ((equal mode "bypassPermissions") "YOLO")
@@ -164,7 +164,16 @@ WIDTH is the available window width."
             (insert (propertize (make-string sep-width ?─)
                                 'face 'vterm-ai-separator)
                     "\n"))
-          (vterm-ai-dashboard--render-session session width))))
+          ;; A single malformed session (e.g. a provider surfacing an
+          ;; unexpected value from its data source) must not blank out
+          ;; the entire dashboard for every other session.
+          (condition-case err
+              (vterm-ai-dashboard--render-session session width)
+            (error
+             (insert (propertize
+                      (format "[ERROR] rendering session failed: %s\n"
+                              (error-message-string err))
+                      'face 'vterm-ai-status-asking)))))))
     ;; Restore cursor position
     (goto-char (point-min))
     (if saved-session

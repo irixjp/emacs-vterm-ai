@@ -173,7 +173,15 @@ MY-GEN is checked against the current generation to discard stale data."
                              :vterm-buffer (vterm-ai-data--find-vterm-buffer
                                             pid ppid-table vterm-table))))
               (when enrich-fn
-                (funcall enrich-fn session))
+                ;; A single provider's enrich function throwing (e.g. on
+                ;; unexpected data from its own data source) must not
+                ;; abort collection for every other session.
+                (condition-case err
+                    (funcall enrich-fn session)
+                  (error
+                   (message "vterm-ai: %s enrich failed for %s: %s"
+                            type (vterm-ai-session-cwd session)
+                            (error-message-string err)))))
               (push session sessions)))))
       (setq vterm-ai-data--collect-processes nil)
       (funcall callback (nreverse sessions)))))

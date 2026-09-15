@@ -24,6 +24,7 @@ It periodically collects session information and displays status, model, working
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (for the Claude provider)
 - [Codex](https://openai.com/index/introducing-codex/) CLI (for the Codex provider, experimental — see below)
 - [Cursor](https://www.cursor.com/) CLI (for the Cursor provider, experimental — see below)
+- [OpenCode](https://opencode.ai/) CLI + `sqlite3` on `PATH` (for the OpenCode provider, experimental — see below)
 
 ## Installation
 
@@ -59,7 +60,7 @@ This opens the `*vterm-ai*` dashboard buffer, which auto-refreshes every 30 seco
 
 ```emacs-lisp
 ;; Providers to enable (default: '(claude))
-(setq vterm-ai-enabled-providers '(claude cursor))
+(setq vterm-ai-enabled-providers '(claude cursor opencode))
 
 ;; Dashboard refresh interval in seconds (default: 30)
 (setq vterm-ai-refresh-interval 30)
@@ -93,6 +94,9 @@ vterm-ai-codex.el      Codex provider: process detection via ps/lsof,
                        session info from ~/.codex/state_5.sqlite
 vterm-ai-cursor.el     Cursor provider: process detection via ps/lsof,
                        status extraction from vterm buffer names
+vterm-ai-opencode.el   OpenCode provider: process detection via ps/lsof,
+                       busy/idle from ~/.local/share/opencode/opencode.db,
+                       "asking" from the companion vterm-ai-status plugin
 vterm-ai-dashboard.el  Dashboard UI rendering and keybindings
 ```
 
@@ -163,6 +167,38 @@ This causes Cursor to set the terminal title with status keywords, which vterm r
 | Waiting for you        | `ASKING`         |
 
 Without this configuration, Cursor sessions will appear as `RUNNING` with no title.
+
+### OpenCode provider (experimental)
+
+To enable, add `opencode` to `vterm-ai-enabled-providers`.
+
+This provider detects `opencode` processes via ps/lsof and reads title, model, mode, and busy/idle status directly from OpenCode's own SQLite database (`~/.local/share/opencode/opencode.db`). Unlike Codex/Cursor, no terminal-title configuration is needed to see `IDLE`/`BUSY`.
+
+#### "Asking" (permission pending) needs a plugin
+
+OpenCode's database has no record of a pending tool-permission request — that state only exists in the running process's memory — and its terminal title doesn't change with status either. So detecting `ASKING` requires a small companion OpenCode plugin (`opencode-plugin/vterm-ai-status.js`) that hooks OpenCode's internal event bus and writes live status to disk.
+
+Install it once (applies to every OpenCode session, no per-project setup):
+
+```
+M-x vterm-ai-opencode-install-plugin
+```
+
+Or manually:
+
+```sh
+cp opencode-plugin/vterm-ai-status.js ~/.config/opencode/plugins/
+```
+
+Restart any running OpenCode sessions afterwards — OpenCode only loads global plugins at startup.
+
+| Signal                                    | Dashboard status |
+|--------------------------------------------|------------------|
+| `session.status` event: `idle`             | `IDLE`           |
+| `session.status` event: `busy`             | `BUSY`           |
+| `permission.asked` event (not yet replied) | `ASKING`         |
+
+Without the plugin installed, OpenCode sessions still show `IDLE`/`BUSY` correctly (from the database), just never `ASKING`.
 
 ## License
 

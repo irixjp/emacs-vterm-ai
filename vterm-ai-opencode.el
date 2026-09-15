@@ -7,6 +7,16 @@
 ;; and Cursor providers, busy/idle status is derived directly from the
 ;; database (whether the most recent message has finished), so no
 ;; terminal-title configuration is required to see live status.
+;;
+;; The database has no record of a pending tool-permission request --
+;; that only exists in the running process's memory -- and OpenCode's
+;; terminal title does not change with status either, so busy/idle/done
+;; is all that can be inferred from files on disk.  To also detect the
+;; "asking" (permission pending) state, install the companion OpenCode
+;; plugin (opencode-plugin/vterm-ai-status.js, or M-x
+;; vterm-ai-opencode-install-plugin), which hooks OpenCode's internal
+;; event bus and writes live status to `vterm-ai-opencode-status-dir'.
+;; This provider works without it, just without "asking" support.
 
 ;;; Code:
 
@@ -21,6 +31,49 @@
   "Path to OpenCode's SQLite database."
   :type 'file
   :group 'vterm-ai)
+
+(defcustom vterm-ai-opencode-status-dir
+  (expand-file-name "opencode/vterm-ai-status"
+                     (or (getenv "XDG_DATA_HOME")
+                         (expand-file-name ".local/share" (getenv "HOME"))))
+  "Directory where the vterm-ai-status OpenCode plugin writes live
+busy/idle/asking status, one JSON file per working directory.  See
+`vterm-ai-opencode-install-plugin'.  Without the plugin installed,
+this provider falls back to database-only busy/idle detection and
+cannot show the \"asking\" (permission pending) state at all."
+  :type 'directory
+  :group 'vterm-ai)
+
+(defcustom vterm-ai-opencode-plugin-dir
+  (expand-file-name "opencode/plugins"
+                     (or (getenv "XDG_CONFIG_HOME")
+                         (expand-file-name ".config" (getenv "HOME"))))
+  "OpenCode's global plugin directory.
+Files placed here are loaded automatically by every OpenCode session.
+See https://opencode.ai/docs/plugins/."
+  :type 'directory
+  :group 'vterm-ai)
+
+(defconst vterm-ai-opencode--plugin-source
+  (expand-file-name
+   "opencode-plugin/vterm-ai-status.js"
+   (file-name-directory (or load-file-name buffer-file-name default-directory)))
+  "Path to the bundled vterm-ai-status OpenCode plugin source.")
+
+;;;###autoload
+(defun vterm-ai-opencode-install-plugin ()
+  "Install the vterm-ai-status OpenCode plugin.
+Copies it into `vterm-ai-opencode-plugin-dir', which enables \"asking\"
+\(permission pending) status detection for the OpenCode provider.
+OpenCode only loads global plugins at startup, so restart any running
+OpenCode sessions afterwards for this to take effect."
+  (interactive)
+  (unless (file-readable-p vterm-ai-opencode--plugin-source)
+    (user-error "Bundled plugin not found at %s" vterm-ai-opencode--plugin-source))
+  (make-directory vterm-ai-opencode-plugin-dir t)
+  (let ((dest (expand-file-name "vterm-ai-status.js" vterm-ai-opencode-plugin-dir)))
+    (copy-file vterm-ai-opencode--plugin-source dest t)
+    (message "Installed %s -- restart OpenCode sessions to pick it up" dest)))
 
 ;;; --- Async process discovery ---
 
@@ -91,6 +144,17 @@ Return the parsed JSON array (as a list of alists), or nil."
            (t nil)))
       (error nil))))
 
+;;; --- SQL NULL helper ---
+
+(defun vterm-ai-opencode--nn (value)
+  "Convert JSON null (parsed by `json-parse-string' as the symbol
+`:null') to nil, so callers can use plain `or' for fallbacks.  SQL NULL
+columns (e.g. session.agent, which is NULL for sessions created
+without an explicit agent) would otherwise pass a non-nil `:null'
+symbol through unchanged, which downstream code that expects a string
+or nil can choke on."
+  (unless (eq value :null) value))
+
 ;;; --- Title helpers ---
 
 (defun vterm-ai-opencode--default-title-p (title)
@@ -119,14 +183,14 @@ ORDER BY s.time_updated DESC LIMIT 1;"
          (rows (vterm-ai-opencode--db-query sql))
          (row (car rows)))
     (when row
-      (let ((role (alist-get 'last_role row))
-            (completed (alist-get 'last_completed row))
-            (title (alist-get 'title row)))
-        `((session-id . ,(alist-get 'id row))
-          (name . ,(alist-get 'slug row))
+      (let ((role (vterm-ai-opencode--nn (alist-get 'last_role row)))
+            (completed (vterm-ai-opencode--nn (alist-get 'last_completed row)))
+            (title (vterm-ai-opencode--nn (alist-get 'title row))))
+        `((session-id . ,(vterm-ai-opencode--nn (alist-get 'id row)))
+          (name . ,(vterm-ai-opencode--nn (alist-get 'slug row)))
           (title . ,(if (vterm-ai-opencode--default-title-p title) "" title))
           (model . ,(vterm-ai-opencode--format-model (alist-get 'model row)))
-          (mode . ,(alist-get 'agent row))
+          (mode . ,(vterm-ai-opencode--nn (alist-get 'agent row)))
           (status . ,(cond
                        ((null role) "idle")
                        ((equal role "user") "busy")
@@ -150,6 +214,38 @@ ORDER BY m.time_created DESC, p.time_created ASC LIMIT %d;"
            (rows (vterm-ai-opencode--db-query sql)))
       (delq nil (mapcar (lambda (row) (alist-get 'text row)) rows)))))
 
+;;; --- Live status (from the vterm-ai-status plugin) ---
+
+(defun vterm-ai-opencode--status-file (cwd)
+  "Return the vterm-ai-status plugin's status file path for CWD.
+The sanitization here must match the plugin's `sanitize' function
+\(opencode-plugin/vterm-ai-status.js) exactly, or the two sides will
+look for different filenames."
+  (expand-file-name
+   (concat (replace-regexp-in-string "[^a-zA-Z0-9]" "-" cwd) ".json")
+   vterm-ai-opencode-status-dir))
+
+(defun vterm-ai-opencode--live-status (cwd pid)
+  "Return the live status ATOM (\"idle\"/\"busy\"/\"waiting\") for CWD,
+as last written by the vterm-ai-status OpenCode plugin, or nil if
+unavailable.  Only trusted when the file's recorded pid matches PID,
+the OpenCode process actually running this session right now -- this
+avoids using a stale file left behind by a previous, now-dead process
+that used to run in the same directory."
+  (let ((file (vterm-ai-opencode--status-file cwd)))
+    (when (file-readable-p file)
+      (condition-case nil
+          (let* ((data (json-parse-string
+                        (with-temp-buffer
+                          (insert-file-contents file)
+                          (buffer-string))
+                        :object-type 'alist))
+                 (file-pid (alist-get 'pid data))
+                 (status (alist-get 'status data)))
+            (when (and status pid file-pid (= file-pid pid))
+              status))
+        (error nil)))))
+
 ;;; --- Enrich cache ---
 
 (defvar vterm-ai-opencode--enrich-cache (make-hash-table :test 'equal)
@@ -171,7 +267,9 @@ Values: (mtime session-id name title model mode status last-prompt).")
 
 (defun vterm-ai-opencode-enrich (session)
   "Enrich SESSION with title, model, mode, status, and last-prompt
-from OpenCode's SQLite database."
+from OpenCode's SQLite database, then overlay live busy/idle/asking
+status from the vterm-ai-status OpenCode plugin, if installed and
+running for this session (see `vterm-ai-opencode-install-plugin')."
   (let* ((cwd (vterm-ai-session-cwd session))
          (mtime (vterm-ai-opencode--newest-mtime))
          (cached (gethash cwd vterm-ai-opencode--enrich-cache)))
@@ -204,7 +302,15 @@ from OpenCode's SQLite database."
               (puthash cwd
                        (cons mtime (list sid name title model mode status last-prompt))
                        vterm-ai-opencode--enrich-cache))
-          (setf (vterm-ai-session-last-prompt session) "(not available)"))))))
+          (setf (vterm-ai-session-last-prompt session) "(not available)"))))
+    ;; The plugin's status file is cheap to read and can change (e.g. a
+    ;; permission request opening or closing) without the database
+    ;; mtime changing in lockstep, so this check always runs fresh,
+    ;; independent of the cache branch above.
+    (let ((live-status (vterm-ai-opencode--live-status
+                        cwd (vterm-ai-session-pid session))))
+      (when live-status
+        (setf (vterm-ai-session-status session) live-status)))))
 
 (defun vterm-ai-opencode-detail (session)
   "Return a detailed string for SESSION with recent prompts."
