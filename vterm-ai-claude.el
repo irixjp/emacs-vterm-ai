@@ -151,6 +151,39 @@ last-prompt, small user messages, and small assistant messages (for model)."
               (forward-line 1))
             (nreverse result)))))))
 
+(defconst vterm-ai-claude--tail-growth-factor 4
+  "Multiplier applied to the tail window each retry in
+`vterm-ai-claude--read-tail-expanding' when the title is not found.")
+
+(defconst vterm-ai-claude--tail-max-attempts 4
+  "Maximum number of window expansions in
+`vterm-ai-claude--read-tail-expanding' (16K -> 64K -> 256K -> 1M).")
+
+(defun vterm-ai-claude--read-tail-expanding (file)
+  "Read tail entries from FILE, growing the window backward when the
+title is not found in the initial (lightweight) window.
+
+A single busy conversation turn can push the most recent ai-title
+past a small fixed-size tail window (see `vterm-ai-claude--read-tail'),
+which would otherwise make the title look empty until the next
+unrelated transcript change shifts the window.  Retrying with a
+larger window is bounded by `vterm-ai-claude--tail-max-attempts' so a
+transcript that genuinely has no title yet does not get re-read in
+full on every enrich cycle."
+  (let ((bytes 16384)
+        (attempts 0)
+        (size (and (file-readable-p file)
+                   (file-attribute-size (file-attributes file))))
+        entries)
+    (while (progn
+             (setq entries (vterm-ai-claude--read-tail file bytes))
+             (and (not (alist-get 'title (vterm-ai-claude--extract-summary entries)))
+                  (< attempts vterm-ai-claude--tail-max-attempts)
+                  (< bytes (or size 0))))
+      (setq bytes (* bytes vterm-ai-claude--tail-growth-factor))
+      (cl-incf attempts))
+    entries))
+
 (defun vterm-ai-claude--extract-text (content)
   "Extract text from a message CONTENT field (string or content-block array)."
   (cond
@@ -235,7 +268,7 @@ Uses file modification time to skip re-reading unchanged files."
               (setf (vterm-ai-session-last-prompt session) (nth 1 data))
               (setf (vterm-ai-session-model session) (nth 2 data))
               (setf (vterm-ai-session-mode session) (nth 3 data)))
-          (let* ((entries (vterm-ai-claude--read-tail file))
+          (let* ((entries (vterm-ai-claude--read-tail-expanding file))
                  (summary (vterm-ai-claude--extract-summary entries))
                  (title (or (alist-get 'title summary) ""))
                  (prompt (or (alist-get 'last-prompt summary) ""))
