@@ -69,6 +69,33 @@
    ((equal status "idle") 'vterm-ai-status-idle)
    (t 'default)))
 
+(defun vterm-ai-dashboard--status-sort-priority (status)
+  "Return the display sort priority for STATUS.
+Lower values are shown first: ASKING, then IDLE, then BUSY/RUNNING,
+with any other status shown last."
+  (cond
+   ((equal status "waiting") 0)
+   ((equal status "idle") 1)
+   ((equal status "busy") 2)
+   ((equal status "running") 2)
+   (t 3)))
+
+(defun vterm-ai-dashboard--sort-sessions (sessions)
+  "Return SESSIONS ordered ASKING, IDLE, BUSY, then everything else.
+Sessions with the same status keep their relative order."
+  (let ((indexed (let ((i -1))
+                   (mapcar (lambda (s) (cons (cl-incf i) s)) sessions))))
+    (mapcar #'cdr
+            (sort indexed
+                  (lambda (a b)
+                    (let ((pa (vterm-ai-dashboard--status-sort-priority
+                               (vterm-ai-session-status (cdr a))))
+                          (pb (vterm-ai-dashboard--status-sort-priority
+                               (vterm-ai-session-status (cdr b)))))
+                      (if (= pa pb)
+                          (< (car a) (car b))
+                        (< pa pb))))))))
+
 (defun vterm-ai-dashboard--session-at-point ()
   "Return the session at point, or nil."
   (get-text-property (point) 'vterm-ai-session))
@@ -215,9 +242,10 @@ WIDTH is the available window width."
      (lambda (sessions)
        (when (buffer-live-p dashboard-buf)
          (with-current-buffer dashboard-buf
-           (setq vterm-ai-dashboard--sessions sessions)
-           (vterm-ai-dashboard--render sessions)
-           (vterm-ai-dashboard--update-header sessions)))))))
+           (setq vterm-ai-dashboard--sessions
+                 (vterm-ai-dashboard--sort-sessions sessions))
+           (vterm-ai-dashboard--render vterm-ai-dashboard--sessions)
+           (vterm-ai-dashboard--update-header vterm-ai-dashboard--sessions)))))))
 
 (defun vterm-ai-dashboard--relayout ()
   "Re-render the last collected sessions without re-collecting data.
