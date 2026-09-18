@@ -65,7 +65,16 @@ Return the process object for cancellation management."
                                      (lst (if (vectorp r) (append r nil) r)))
                                 (cl-remove-if
                                  (lambda (a)
-                                   (string-match-p "⑂" (or (alist-get 'name a) "")))
+                                   (or
+                                    ;; Exclude subagents/forks. Claude harness marks
+                                    ;; these with the "⑂" glyph in session name.
+                                    (string-match-p "⑂" (or (alist-get 'name a) ""))
+                                    ;; Hide finished background sessions. They can stay
+                                    ;; visible in `claude agents --json` while their
+                                    ;; worker process still exists, but they are no
+                                    ;; longer actionable in vterm-ai.
+                                    (and (equal (alist-get 'kind a) "background")
+                                         (equal (alist-get 'state a) "done"))))
                                  lst))
                             (error nil)))))
            (when (buffer-live-p (process-buffer proc))
@@ -327,7 +336,15 @@ Uses file modification time to skip re-reading unchanged files."
               (setf (vterm-ai-session-mode session) (nth 3 data)))
           (let* ((entries (vterm-ai-claude--read-tail-expanding file))
                  (summary (vterm-ai-claude--extract-summary entries))
-                 (title (or (alist-get 'title summary) ""))
+                 (name (or (vterm-ai-session-name session) ""))
+                 (title-from-transcript (or (alist-get 'title summary) ""))
+                 (title (if (and (not (string-empty-p name))
+                                 ;; During permission prompts, transcript ai-title
+                                 ;; can lag behind a renamed session title. Prefer
+                                 ;; the authoritative session name when waiting.
+                                 (equal (vterm-ai-session-status session) "waiting"))
+                            name
+                          title-from-transcript))
                  (prompt (or (alist-get 'last-prompt summary) ""))
                  (model (or (alist-get 'model summary) ""))
                  (mode (or (vterm-ai-claude--read-permission-mode file) "")))
