@@ -45,6 +45,18 @@
   "Face for separators between sessions."
   :group 'vterm-ai)
 
+(defface vterm-ai-help-key
+  '((t :inherit vterm-ai-label :weight bold))
+  "Face for key names in the keybinding hint line."
+  :group 'vterm-ai)
+
+(defconst vterm-ai-dashboard--keybinding-hint
+  '((("RET" . "Open") ("o" . "Other Win") ("d" . "Dired") ("D" . "Detail"))
+    (("g" . "Refresh") ("n/p" . "Next/Prev") ("q" . "Quit")))
+  "Rows of (KEY . DESCRIPTION) shown as a hint below the header line.
+Each inner list is rendered on its own line, since vterm-ai is meant
+to be used in narrow windows.")
+
 (defvar vterm-ai-dashboard--sessions nil
   "Current list of sessions displayed in the dashboard.")
 
@@ -172,6 +184,20 @@ WIDTH is the available window width."
     ;; Tag the entire region with the session
     (put-text-property start (point) 'vterm-ai-session session)))
 
+(defun vterm-ai-dashboard--insert-keybinding-hint (sep-width)
+  "Insert the keybinding hint lines, underlined by a rule of SEP-WIDTH."
+  (dolist (row vterm-ai-dashboard--keybinding-hint)
+    (insert (propertize
+             (mapconcat (lambda (kv)
+                          (concat (propertize (car kv) 'face 'vterm-ai-help-key)
+                                  ":" (cdr kv)))
+                        row
+                        "  ")
+             'face 'vterm-ai-label)
+            "\n"))
+  (insert (propertize (make-string sep-width ?─) 'face 'vterm-ai-separator)
+          "\n"))
+
 (defun vterm-ai-dashboard--render (sessions)
   "Render all SESSIONS into the current buffer."
   (let* ((inhibit-read-only t)
@@ -181,6 +207,7 @@ WIDTH is the available window width."
          (width (window-width win))
          (sep-width (max 1 (min width 80))))
     (erase-buffer)
+    (vterm-ai-dashboard--insert-keybinding-hint sep-width)
     (if (null sessions)
         (insert (propertize "No active AI agent sessions found.\n"
                             'face 'vterm-ai-label))
