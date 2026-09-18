@@ -247,6 +247,62 @@ type:permission-mode entry without reading the whole file."
         (setq pos (max 0 (- pos chunk))))
       result)))
 
+;;; --- vterm buffer fallback linking ---
+
+(defun vterm-ai-claude--normalize-dir (dir)
+  "Return DIR as an absolute, truenamed directory path with trailing slash.
+If DIR is nil/empty, return nil.  Falls back to `expand-file-name' if
+`file-truename' cannot be resolved (for example on missing paths)."
+  (when (and (stringp dir) (not (string-empty-p dir)))
+    (let* ((expanded (expand-file-name dir))
+           (truename (condition-case nil
+                         (file-truename expanded)
+                       (error expanded))))
+      (file-name-as-directory truename))))
+
+(defun vterm-ai-claude--vterm-shell-pid (buf)
+  "Return BUF's live vterm shell pid, or nil if unavailable."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (when (and (eq major-mode 'vterm-mode)
+                 (boundp 'vterm--process)
+                 vterm--process
+                 (process-live-p vterm--process))
+        (process-id vterm--process)))))
+
+(defun vterm-ai-claude--find-vterm-buffer-fallback (session)
+  "Best-effort vterm buffer lookup for SESSION when PID linking fails.
+Daemon-managed Claude sessions can report a worker pid that is detached from
+the vterm shell process tree, so `vterm-ai-data--find-vterm-buffer' cannot
+resolve them by PPID chain.  This fallback tries:
+1) session-name + cwd match
+2) session-name match
+3) cwd match
+Only a unique candidate is accepted at each step."
+  (let* ((session-name (vterm-ai-session-name session))
+         (session-cwd (vterm-ai-claude--normalize-dir
+                       (vterm-ai-session-cwd session)))
+         name-matches
+         cwd-matches)
+    (dolist (buf (buffer-list))
+      (let ((shell-pid (vterm-ai-claude--vterm-shell-pid buf)))
+        (when shell-pid
+          (with-current-buffer buf
+            (let ((buf-name (buffer-name buf))
+                  (buf-cwd (vterm-ai-claude--normalize-dir default-directory)))
+              (when (and (stringp session-name)
+                         (not (string-empty-p session-name))
+                         (string-match-p (regexp-quote session-name) buf-name))
+                (push buf name-matches))
+              (when (and session-cwd buf-cwd (equal session-cwd buf-cwd))
+                (push buf cwd-matches)))))))
+    (let ((name+cwd (cl-intersection name-matches cwd-matches :test #'eq)))
+      (cond
+       ((= (length name+cwd) 1) (car name+cwd))
+       ((= (length name-matches) 1) (car name-matches))
+       ((= (length cwd-matches) 1) (car cwd-matches))
+       (t nil)))))
+
 ;;; --- Enrichment cache ---
 
 (defvar vterm-ai-claude--enrich-cache (make-hash-table :test 'equal)
@@ -280,7 +336,13 @@ Uses file modification time to skip re-reading unchanged files."
             (setf (vterm-ai-session-model session) model)
             (setf (vterm-ai-session-mode session) mode)
             (puthash sid (cons mtime (list title prompt model mode))
-                     vterm-ai-claude--enrich-cache)))))))
+                     vterm-ai-claude--enrich-cache))))
+      (unless (vterm-ai-session-vterm-buffer session)
+        (let ((fallback (vterm-ai-claude--find-vterm-buffer-fallback session)))
+          (when fallback
+            (setf (vterm-ai-session-vterm-buffer session) fallback
+                  (vterm-ai-session-shell-pid session)
+                  (vterm-ai-claude--vterm-shell-pid fallback))))))))
 
 (defun vterm-ai-claude--extract-recent-prompts (entries &optional limit)
   "Extract the last LIMIT (default 5) human prompts from ENTRIES."
