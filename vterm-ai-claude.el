@@ -64,7 +64,8 @@ Return the process object for cancellation management."
                               (let* ((r (json-parse-buffer :object-type 'alist))
                                      (lst (if (vectorp r) (append r nil) r)))
                                 (cl-remove-if
-                                 (lambda (a) (equal (alist-get 'kind a) "background"))
+                                 (lambda (a)
+                                   (string-match-p "⑂" (or (alist-get 'name a) "")))
                                  lst))
                             (error nil)))))
            (when (buffer-live-p (process-buffer proc))
