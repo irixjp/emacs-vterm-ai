@@ -30,7 +30,11 @@ Return the process object for cancellation management."
      :name "vterm-ai-codex-detect"
      :buffer buf
      :command '("sh" "-c"
-                "data=$(ps -eo pid,ppid,comm | awk '$3 ~ /\\/codex$/ {print $1, $2}'); echo \"$data\" | awk '{if ($1!=\"\") {ppid[$1]=$2; is[$1]=1}} END{for (p in is) if (!(ppid[p] in is)) print p}' | while read pid; do cwd=$(lsof -a -d cwd -p \"$pid\" -F n 2>/dev/null | grep '^n/' | sed 's/^n//'); [ -n \"$cwd\" ] && echo \"$pid $cwd\"; done")
+                ;; Exclude processes with no controlling terminal (TTY
+                ;; "?"/"??"): these are background services such as the
+                ;; Codex app-server daemon, not interactive CLI sessions
+                ;; running in a vterm buffer.
+                "data=$(ps -eo pid,ppid,tty,comm | awk '$3 !~ /^\\?/ && $4 ~ /\\/codex$/ {print $1, $2}'); echo \"$data\" | awk '{if ($1!=\"\") {ppid[$1]=$2; is[$1]=1}} END{for (p in is) if (!(ppid[p] in is)) print p}' | while read pid; do cwd=$(lsof -a -d cwd -p \"$pid\" -F n 2>/dev/null | grep '^n/' | sed 's/^n//'); [ -n \"$cwd\" ] && echo \"$pid $cwd\"; done")
      :sentinel
      (lambda (proc _event)
        (when (memq (process-status proc) '(exit signal))
