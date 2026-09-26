@@ -22,9 +22,10 @@ It periodically collects session information and displays status, model, working
 - Emacs 27.1+
 - [vterm](https://github.com/akermu/emacs-libvterm)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (for the Claude provider)
-- [Codex](https://openai.com/index/introducing-codex/) CLI (for the Codex provider, experimental — see below)
-- [Cursor](https://www.cursor.com/) CLI (for the Cursor provider, experimental — see below)
+- [Codex](https://openai.com/index/introducing-codex/) CLI + `sqlite3` on `PATH` (for the Codex provider, experimental — see below)
+- [Cursor](https://www.cursor.com/) CLI + `sqlite3` on `PATH` (for the Cursor provider, experimental — see below)
 - [OpenCode](https://opencode.ai/) CLI + `sqlite3` on `PATH` (for the OpenCode provider, experimental — see below)
+- `ps` and `lsof` on `PATH` (for process detection in the Codex, Cursor, and OpenCode providers)
 
 ## Installation
 
@@ -104,22 +105,33 @@ vterm-ai-dashboard.el  Dashboard UI rendering and keybindings
 
 Each provider registers a plist with the following keys:
 
-| Key                    | Signature              | Description                         |
-|------------------------|------------------------|-------------------------------------|
-| `:name`                | string                 | Provider identifier (e.g. "claude") |
-| `:get-sessions-async`  | `(callback) -> process`| Discover sessions asynchronously    |
-| `:enrich`              | `(session) -> nil`     | Populate title, model, last-prompt  |
-| `:detail`              | `(session) -> string`  | Generate detail view text           |
+| Key                    | Signature                               | Description                         |
+|------------------------|------------------------------------------|-------------------------------------|
+| `:name`                | string                                   | Provider identifier (e.g. "claude") |
+| `:get-sessions-async`  | `(callback) -> process or (process...)`  | Discover sessions asynchronously    |
+| `:enrich`              | `(session) -> nil`                       | Populate title, model, last-prompt  |
+| `:detail`              | `(session) -> string`                    | Generate detail view text           |
 
 To add support for a new agent (e.g. Cursor), create a new file that implements these four functions and calls `vterm-ai-register-provider`.
 
 ## Notes
+
+### Claude provider
+
+The Claude provider follows `claude agents --json` for the live session list, but hides two kinds of entries that aren't useful to monitor:
+
+- Subagents/forks, identified by the "⑂" glyph the Claude harness adds to their session name
+- Background sessions (`kind: "background"`) that have already finished (`state: "done"`)
+
+Sessions launched with `--bg`, dispatched from the agents view, or auto-migrated to the daemon still appear while active — only the subagent marker and "finished background" combination are filtered out.
 
 ### Codex provider (experimental)
 
 To enable, add `codex` to `vterm-ai-enabled-providers`.
 
 This provider detects Codex processes and retrieves model info from `~/.codex/state_5.sqlite`. Status and project name are extracted from the vterm buffer name.
+
+Process detection only considers processes attached to a controlling terminal, so Codex's background `app-server` daemon (which keeps running independently of any vterm session, with no TTY of its own) is excluded and won't show up as a phantom session.
 
 #### Codex side configuration
 
