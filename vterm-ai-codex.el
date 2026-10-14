@@ -58,20 +58,68 @@ Return the process object for cancellation management."
 
 ;;; --- Status from vterm buffer name ---
 
+(defconst vterm-ai-codex--spinner-re "[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]"
+  "Braille frames Codex puts in the default activity title while a task runs.")
+
+(defun vterm-ai-codex--buffer-title (name)
+  "Return the Codex terminal title inside vterm buffer NAME.
+Strips a \"vterm: \" prefix and a leading \"#N \" buffer disambiguator."
+  (let ((s (if (string-match "\\`vterm: \\(.+\\)" name)
+               (match-string 1 name)
+             name)))
+    (if (string-match "\\`#[0-9]+ \\(.+\\)" s)
+        (match-string 1 s)
+      s)))
+
+(defun vterm-ai-codex--status-word (segment)
+  "Return Ready/Working/Thinking/Starting/Waiting if SEGMENT is that run-state.
+A project name that is exactly one of those words is treated as the run-state."
+  (let ((s (string-trim
+            (replace-regexp-in-string vterm-ai-codex--spinner-re "" segment))))
+    (when (string-match
+           "\\`\\(?:codex[[:space:]]+\\)?\\(Ready\\|Working\\|Thinking\\|Starting\\|Waiting\\)\\(?:\\.\\.\\.\\)?\\'"
+           s)
+      (match-string 1 s))))
+
+(defun vterm-ai-codex--project-from-title (title)
+  "Return the last title segment of TITLE, dropping a bare status word."
+  (let* ((parts (split-string title " | " t "[ \t]+"))
+         (last (or (car (last parts)) ""))
+         (clean (string-trim
+                 (replace-regexp-in-string vterm-ai-codex--spinner-re "" last))))
+    (if (or (vterm-ai-codex--status-word clean)
+            (string-match-p "Action Required" clean))
+        ""
+      clean)))
+
+(defun vterm-ai-codex--run-state (title)
+  "Return (status . project) when TITLE contains a run-state segment."
+  (let (word)
+    (dolist (part (split-string title " | " t))
+      (setq word (or word (vterm-ai-codex--status-word part))))
+    (when word
+      (cons (if (equal word "Ready") "idle" "busy")
+            (vterm-ai-codex--project-from-title title)))))
+
 (defun vterm-ai-codex--parse-buffer-name (name)
   "Parse vterm buffer NAME for Codex status and project name.
-Return (status . project) or nil."
-  (let ((stripped (if (string-match "\\`vterm: \\(.+\\)" name)
-                      (match-string 1 name)
-                    name)))
+Return (status . project), or nil when NAME is not a Codex title.
+
+The default title (no `terminal_title` config) is activity plus the
+project name: a braille spinner while a task runs, `Action Required`
+while blocked on the user, and the project name alone when idle.
+`run-state` words are recognized when that item is configured."
+  (let ((title (vterm-ai-codex--buffer-title name)))
     (cond
-     ((string-match "Action Required | .+ | \\(.+\\)" stripped)
-      (cons "waiting" (string-trim (match-string 1 stripped))))
-     ((string-match "Working | \\(.+\\)" stripped)
-      (cons "busy" (string-trim (match-string 1 stripped))))
-     ((string-match "Ready | \\(.+\\)" stripped)
-      (cons "idle" (string-trim (match-string 1 stripped))))
-     (t nil))))
+     ((or (string-empty-p (string-trim title))
+          (string-match-p "\\`\\*?vterminal\\(?:<[^>]+>\\)?\\*?\\'" title))
+      nil)
+     ((string-match-p "Action Required" title)
+      (cons "waiting" (vterm-ai-codex--project-from-title title)))
+     ((vterm-ai-codex--run-state title))
+     ((string-match-p vterm-ai-codex--spinner-re title)
+      (cons "busy" (vterm-ai-codex--project-from-title title)))
+     (t (cons "idle" (string-trim title))))))
 
 ;;; --- Approval mode mapping ---
 

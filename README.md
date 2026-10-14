@@ -125,6 +125,25 @@ The Claude provider follows `claude agents --json` for the live session list, bu
 
 Sessions launched with `--bg`, dispatched from the agents view, or auto-migrated to the daemon still appear while active — only the subagent marker and "finished background" combination are filtered out.
 
+#### Agent View disabled
+
+`disableAgentView` (or `CLAUDE_CODE_DISABLE_AGENT_VIEW=1`) makes `claude agents --json` exit with an error, so that command no longer lists sessions. Interactive sessions are then read from `sessions/<pid>.json` under each directory in `vterm-ai-claude-config-dirs`. A record is kept only while that pid is still a live `claude` process.
+
+IDLE / BUSY / ASKING do not come from that json file. Its `status` field lags during a turn. They come from a hook you install, which overwrites one line at `$CLAUDE_CONFIG_DIR/session-state/<session-id>`:
+
+```text
+BUSY<TAB>epoch<TAB>hook-event<TAB>claude-pid<TAB>cwd
+```
+
+`cwd` is the last field and may contain spaces. Map `BUSY` / `ASKING` / `IDLE` to the dashboard. Wire the hook per config directory (`UserPromptSubmit` and `PostToolUse` → BUSY, `PermissionRequest` → ASKING, `Stop` / `StopFailure` / `SessionStart` → IDLE, `SessionEnd` → delete the file). With no hook file, the session stays `RUNNING`.
+
+Two limits of that file:
+
+- If `claude` crashes, `SessionEnd` never runs and the file is left behind. A numeric pid that is not a live `claude` process is ignored. A pid of `-` (the hook could not find the process) is still used.
+- After Esc, or after denying a permission, BUSY / ASKING can sit unchanged until the next prompt. Nothing fires a hook for those.
+
+When Agent View is enabled again, `claude agents --json` wins for a session that appears in both places, including its `waiting` status. The hook file is not consulted for that record.
+
 ### Codex provider (experimental)
 
 To enable, add `codex` to `vterm-ai-enabled-providers`.
@@ -133,24 +152,26 @@ This provider detects Codex processes and retrieves model info from `~/.codex/st
 
 Process detection only considers processes attached to a controlling terminal, so Codex's background `app-server` daemon (which keeps running independently of any vterm session, with no TTY of its own) is excluded and won't show up as a phantom session.
 
-#### Codex side configuration
+#### Status from the terminal title
 
-Add the following to `~/.codex/config.toml` under the `[tui]` section:
+Codex's default terminal title is the activity indicator plus the project name. No `terminal_title` setting is required. vterm copies that title into the buffer name, and the provider maps it as follows:
+
+| Terminal title | Dashboard status |
+|----------------|------------------|
+| project name only (idle) | `IDLE` |
+| braille spinner (`⠋` …) while a task runs | `BUSY` |
+| `[ ! ] Action Required` or `[ . ] Action Required` | `ASKING` |
+| `Ready` | `IDLE` |
+| `Working`, `Thinking`, `Starting`, `Waiting` | `BUSY` |
+
+`Ready` / `Working` / `Thinking` / `Starting` / `Waiting` appear only when `run-state` is listed in `terminal_title`. To show those words in the tab title:
 
 ```toml
 [tui]
 terminal_title = ["app-name", "activity", "run-state", "project-name"]
 ```
 
-This causes Codex to set the terminal title with status and project name, which vterm reflects in the buffer name. The provider maps these to dashboard statuses:
-
-| Terminal title keyword | Dashboard status |
-|------------------------|------------------|
-| Ready                  | `IDLE`           |
-| Working                | `BUSY`           |
-| Action Required        | `ASKING`         |
-
-Without this configuration, Codex sessions will appear as `RUNNING` with no title.
+A session whose vterm buffer still has a generic name (`*vterminal*`) stays `RUNNING`.
 
 ### Cursor provider (experimental)
 

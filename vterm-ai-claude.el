@@ -2,8 +2,10 @@
 
 ;;; Commentary:
 ;; Implements the Claude Code provider: async session discovery via
-;; `claude agents --json' and lightweight JSONL transcript parsing
-;; for title, model, and last prompt.
+;; `claude agents --json' and sessions/<pid>.json (the latter covers
+;; `disableAgentView').  Status for file-discovered sessions comes
+;; from session-state/<session-id> written by the state.sh hook.
+;; JSONL transcripts supply title, model, and last prompt.
 
 ;;; Code:
 
@@ -39,10 +41,111 @@ use several, list them all, e.g.:
 
 ;;; --- Async session discovery ---
 
+(defun vterm-ai-claude--skip-session-p (agent)
+  "Return non-nil if AGENT should not be shown.
+Drops subagent/fork names and finished background sessions."
+  (or
+   ;; Exclude subagents/forks. Claude harness marks these with the
+   ;; "⑂" glyph in session name.
+   (string-match-p "⑂" (or (alist-get 'name agent) ""))
+   ;; Hide finished background sessions. They can stay visible in
+   ;; `claude agents --json` while their worker process still exists,
+   ;; but they are no longer actionable in vterm-ai.
+   (and (equal (alist-get 'kind agent) "background")
+        (equal (alist-get 'state agent) "done"))))
+
+(defun vterm-ai-claude--live-claude-p (pid)
+  "Return non-nil if PID is a live process whose command is claude.
+Claude rewrites its process title, so `comm' is a version string and
+the original argv lives in `args'."
+  (let ((attrs (and (integerp pid) (> pid 0) (process-attributes pid))))
+    (when attrs
+      (equal (file-name-nondirectory
+              (or (car (split-string (or (alist-get 'args attrs) ""))) ""))
+             "claude"))))
+
+(defun vterm-ai-claude--map-hook-status (raw)
+  "Map a state.sh status word RAW to a dashboard status, or nil."
+  (cond
+   ((equal raw "BUSY") "busy")
+   ((equal raw "ASKING") "waiting")
+   ((equal raw "IDLE") "idle")))
+
+(defun vterm-ai-claude--read-hook-status (dir session-id)
+  "Read dashboard status from DIR/session-state/SESSION-ID, or nil.
+The file is one tab-separated line: status, epoch, hook event, pid, cwd.
+A numeric pid that is not a live claude process means the file was left
+behind after a crash, so the status is ignored."
+  (when (and (stringp session-id) (not (string-empty-p session-id)))
+    (let ((file (expand-file-name
+                 session-id
+                 (expand-file-name "session-state" (expand-file-name dir)))))
+      (when (file-readable-p file)
+        (with-temp-buffer
+          (insert-file-contents file nil 0 4096)
+          (let* ((parts (split-string
+                         (buffer-substring-no-properties
+                          (line-beginning-position) (line-end-position))
+                         "\t"))
+                 (pid (nth 3 parts)))
+            (when (or (null pid) (equal pid "-") (string-empty-p pid)
+                      (and (string-match-p "\\`[0-9]+\\'" pid)
+                           (vterm-ai-claude--live-claude-p
+                            (string-to-number pid))))
+              (vterm-ai-claude--map-hook-status (car parts)))))))))
+
+(defun vterm-ai-claude--read-session-files (dir)
+  "Read live Claude sessions from DIR/sessions/<pid>.json.
+Status comes from session-state/<session-id> when that hook file is
+present and its pid is still live; otherwise \"running\"."
+  (let ((sessions-dir (expand-file-name "sessions" (expand-file-name dir)))
+        result)
+    (when (file-directory-p sessions-dir)
+      (dolist (file (directory-files sessions-dir t "\\`[0-9]+\\.json\\'"))
+        (condition-case nil
+            (let* ((obj (json-parse-string
+                         (with-temp-buffer
+                           (insert-file-contents file)
+                           (buffer-string))
+                         :object-type 'alist))
+                   (pid (alist-get 'pid obj)))
+              (when (and (integerp pid)
+                         (vterm-ai-claude--live-claude-p pid)
+                         (not (vterm-ai-claude--skip-session-p obj)))
+                (setf (alist-get 'status obj)
+                      (or (vterm-ai-claude--read-hook-status
+                           dir (alist-get 'sessionId obj))
+                          "running"))
+                (push obj result)))
+          (error nil))))
+    (nreverse result)))
+
+(defun vterm-ai-claude--parse-agents-output (proc)
+  "Parse `claude agents --json' output from PROC, or nil on failure."
+  (when (and (zerop (process-exit-status proc))
+             (buffer-live-p (process-buffer proc)))
+    (with-current-buffer (process-buffer proc)
+      (goto-char (point-min))
+      (condition-case nil
+          (let* ((r (json-parse-buffer :object-type 'alist))
+                 (lst (if (vectorp r) (append r nil) r)))
+            (cl-remove-if #'vterm-ai-claude--skip-session-p lst))
+        (error nil)))))
+
+(defun vterm-ai-claude--merge-sessions (agents files)
+  "Append FILES not already present in AGENTS, matched by sessionId.
+AGENTS wins so a live waiting status is not replaced by a file record."
+  (let ((ids (mapcar (lambda (a) (alist-get 'sessionId a)) agents)))
+    (append agents
+            (cl-remove-if
+             (lambda (a) (member (alist-get 'sessionId a) ids))
+             files))))
+
 (defun vterm-ai-claude--get-sessions-one (dir callback)
-  "Run `claude agents --json' with `CLAUDE_CONFIG_DIR' set to DIR.
-Call CALLBACK with a list of alists on completion.
-Return the process object for cancellation management."
+  "Discover Claude sessions for config DIR and call CALLBACK with alists.
+Runs `claude agents --json' and also reads sessions/<pid>.json so
+discovery still works when Agent View is disabled.  Agents records
+win on sessionId.  Return the process object for cancellation."
   (let* ((buf (generate-new-buffer " *vterm-ai-claude*"))
          (process-environment
           (cons (format "CLAUDE_CONFIG_DIR=%s" (expand-file-name dir))
@@ -56,32 +159,14 @@ Return the process object for cancellation management."
        (when (memq (process-status proc) '(exit signal))
          (unwind-protect
              (funcall callback
-                      (when (and (zerop (process-exit-status proc))
-                                 (buffer-live-p (process-buffer proc)))
-                        (with-current-buffer (process-buffer proc)
-                          (goto-char (point-min))
-                          (condition-case nil
-                              (let* ((r (json-parse-buffer :object-type 'alist))
-                                     (lst (if (vectorp r) (append r nil) r)))
-                                (cl-remove-if
-                                 (lambda (a)
-                                   (or
-                                    ;; Exclude subagents/forks. Claude harness marks
-                                    ;; these with the "⑂" glyph in session name.
-                                    (string-match-p "⑂" (or (alist-get 'name a) ""))
-                                    ;; Hide finished background sessions. They can stay
-                                    ;; visible in `claude agents --json` while their
-                                    ;; worker process still exists, but they are no
-                                    ;; longer actionable in vterm-ai.
-                                    (and (equal (alist-get 'kind a) "background")
-                                         (equal (alist-get 'state a) "done"))))
-                                 lst))
-                            (error nil)))))
+                      (vterm-ai-claude--merge-sessions
+                       (vterm-ai-claude--parse-agents-output proc)
+                       (vterm-ai-claude--read-session-files dir)))
            (when (buffer-live-p (process-buffer proc))
              (kill-buffer (process-buffer proc)))))))))
 
 (defun vterm-ai-claude--get-sessions-async (callback)
-  "Run `claude agents --json' once per `vterm-ai-claude-config-dirs'.
+  "Discover Claude sessions once per `vterm-ai-claude-config-dirs'.
 Merge the results and call CALLBACK with the combined list of alists.
 Return a list of process objects for cancellation management."
   (let* ((dirs (or vterm-ai-claude-config-dirs (list vterm-ai-claude--dir)))
