@@ -59,6 +59,40 @@ This opens the `*vterm-ai*` dashboard buffer, which auto-refreshes every 30 seco
 | `q`   | Quit dashboard                            |
 | `i`   | Show / hide quiet idle sessions           |
 | `v`   | Switch between compact and full cards     |
+| `R`   | Resume a past session (`vterm-ai-resume`) |
+
+### Resuming past sessions
+
+`M-x vterm-ai-resume` (or `R` in the dashboard) lists the sessions of the
+last `vterm-ai-resume-days` (30) days from every Claude config dir and
+Codex home, newest first, and resumes the one you pick in a new vterm in
+another window, in the session's working directory:
+
+```
+[personal]      claude …opbox/home/src/coding-agent 11/24 14:05  last prompt…
+[redhat_vertex] claude ~/.claude.conf               11/24 13:30  last prompt…
+[personal]      codex  …ivate/tmp/osc7501-test/work 11/24 13:12  thread title
+```
+
+Claude sessions come from each config dir's `history.jsonl` (labelled with
+the last prompt that is not a slash command; sessions whose transcript is
+gone are skipped). Codex sessions are the interactive (`cli`) threads in
+each home's `state_5.sqlite`. A session that is running in a vterm right
+now is marked `(running)`, and picking it shows that buffer instead of
+starting a second copy of the conversation.
+
+The command typed into the new vterm comes from `vterm-ai-resume-commands`,
+which maps each directory to the command that starts that agent with it.
+With per-account shell aliases:
+
+```emacs-lisp
+(setq vterm-ai-resume-commands
+      '(("~/.claude_personal" . "claude-personal")
+        ("~/.codex_personal"  . "codex-personal")))
+```
+
+This types `claude-personal --resume <id>` or `codex-personal resume <id>`.
+Directories missing from the alist are not listed.
 
 ### Cards for a small window
 

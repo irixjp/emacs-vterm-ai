@@ -9,6 +9,7 @@
 (require 'vterm-ai-data)
 
 (defvar vterm-ai-refresh-interval)
+(declare-function vterm-ai-resume "vterm-ai-resume")
 
 (defface vterm-ai-status-busy
   '((t :foreground "orange" :weight bold))
@@ -104,7 +105,7 @@ nil keeps every session visible.  `i' toggles showing them."
 (defconst vterm-ai-dashboard--keybinding-hint
   '((("RET" . "Open") ("o" . "Other Win") ("d" . "Dired") ("D" . "Detail"))
     (("g" . "Refresh") ("n/p" . "Next/Prev") ("q" . "Quit"))
-    (("i" . "Quiet idle") ("v" . "Compact/Full")))
+    (("i" . "Quiet idle") ("v" . "Compact/Full") ("R" . "Resume")))
   "Rows of (KEY . DESCRIPTION) shown as a hint below the header line.
 Each inner list is rendered on its own line, since vterm-ai is meant
 to be used in narrow windows.")
@@ -676,6 +677,7 @@ also run a full collection to discover it."
     (define-key map (kbd "p") #'vterm-ai-prev-session)
     (define-key map (kbd "i") #'vterm-ai-dashboard-toggle-quiet-idle)
     (define-key map (kbd "v") #'vterm-ai-dashboard-toggle-compact)
+    (define-key map (kbd "R") #'vterm-ai-resume)
     (define-key map (kbd "q") #'quit-window)
     map)
   "Keymap for `vterm-ai-dashboard-mode'.")

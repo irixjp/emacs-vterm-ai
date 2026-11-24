@@ -17,6 +17,7 @@
 
 (require 'vterm-ai-data)
 (require 'vterm-ai-dashboard)
+(require 'vterm-ai-resume)
 
 (defgroup vterm-ai nil
   "Dashboard for Claude Code instances in vterm."
