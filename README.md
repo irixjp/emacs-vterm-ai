@@ -57,6 +57,34 @@ This opens the `*vterm-ai*` dashboard buffer, which auto-refreshes every 30 seco
 | `n`   | Next session                              |
 | `p`   | Previous session                          |
 | `q`   | Quit dashboard                            |
+| `i`   | Show / hide quiet idle sessions           |
+| `v`   | Switch between compact and full cards     |
+
+### Cards for a small window
+
+The dashboard is meant to stay open in a small window, so by default
+(`vterm-ai-dashboard-compact`) each card's size follows its state:
+
+| State | Card |
+|---|---|
+| `ASKING` | status line, `Path:`, `Now:` (what it waits for), one-line `Prompt:` |
+| `DONE` | status line, `Path:`, `Reply:` (the first lines of what the agent last said), one-line `Prompt:` |
+| `ERROR` | status line, `Path:`, `Now:`, one-line `Prompt:` |
+| `BUSY` | status line, `Now:` (what it is doing) |
+| `IDLE` / `RUNNING` | status line only |
+
+`ASKING` and `DONE` cards are tinted (`vterm-ai-card-asking`,
+`vterm-ai-card-done`) so the cards that want a look stand out. A
+non-default permission mode stays on the status line, as in `{Plan}`. The
+model and the full reply are in the detail view (`D`). Sessions that have
+been `IDLE` longer than `vterm-ai-dashboard-stale-after` (30 minutes)
+collapse into one summary line; `i` shows them. `v` switches to the full
+cards of earlier versions.
+
+`Reply:` comes from the agent's own records: for Claude, the newest
+assistant message that ended its turn in the transcript; for Codex, the
+`last_agent_message` of the newest `task_complete` event in the thread's
+rollout file. It is read again as soon as a session turns `DONE`.
 
 ### Configuration
 
@@ -71,6 +99,12 @@ This opens the `*vterm-ai*` dashboard buffer, which auto-refreshes every 30 seco
 ;; An update rewrites only the time labels, and only while the dashboard
 ;; is on a visible frame; state changes redraw immediately regardless.
 (setq vterm-ai-dashboard-tick-interval 10)
+
+;; Size cards by state for a small window (default: t)
+(setq vterm-ai-dashboard-compact t)
+
+;; Collapse sessions IDLE for this many seconds, or nil to never (default: 1800)
+(setq vterm-ai-dashboard-stale-after 1800)
 ```
 
 #### Multiple Claude config directories

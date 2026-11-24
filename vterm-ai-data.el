@@ -32,7 +32,9 @@
   children
   state-since
   ;; Where status came from: "osc", "agents", "hook", "title", or nil.
-  status-source)
+  status-source
+  ;; What the agent last said when it finished a turn.
+  last-reply)
 
 ;;; --- Provider registry ---
 
@@ -238,6 +240,21 @@ cannot leak a stale state.  Safe to call repeatedly."
             (vterm-ai-session-children session) nil
             (vterm-ai-session-status-source session) nil)))))
 
+(defun vterm-ai-data-reenrich (session)
+  "Re-read SESSION's provider data, then overlay its OSC 7501 report.
+Used when a session reaches DONE so its last reply shows without waiting
+for the next collection.  Enrich may reset status from other sources,
+so the OSC overlay is applied again afterwards."
+  (let* ((provider (vterm-ai-data--find-provider (vterm-ai-session-type session)))
+         (enrich-fn (and provider (plist-get provider :enrich))))
+    (when enrich-fn
+      (condition-case err
+          (funcall enrich-fn session)
+        (error
+         (message "vterm-ai: %s re-enrich failed: %s"
+                  (vterm-ai-session-type session) (error-message-string err)))))
+    (vterm-ai-data-apply-osc session)))
+
 ;;; --- Detail dispatch ---
 
 (defun vterm-ai-data--get-detail (session)
@@ -250,7 +267,11 @@ cannot leak a stale state.  Safe to call repeatedly."
              (or (vterm-ai-session-status-source session) "none"))
      (if detail-fn
          (funcall detail-fn session)
-       (format "No detail available for provider: %s" type)))))
+       (format "No detail available for provider: %s" type))
+     (let ((reply (vterm-ai-session-last-reply session)))
+       (if (and reply (not (string-empty-p reply)))
+           (concat "\n--- Last Reply ---\n\n" reply "\n")
+         "")))))
 
 (provide 'vterm-ai-data)
 ;;; vterm-ai-data.el ends here

@@ -43,6 +43,34 @@ regardless of this interval."
   :type '(choice (integer :tag "Seconds") (const :tag "Disabled" nil))
   :group 'vterm-ai)
 
+(defcustom vterm-ai-dashboard-compact t
+  "When non-nil, size each card by its state for small windows.
+ASKING, DONE, and ERROR get details, BUSY gets what it is doing, and
+other states get one line.  `v' toggles this in the dashboard."
+  :type 'boolean
+  :group 'vterm-ai)
+
+(defcustom vterm-ai-dashboard-stale-after 1800
+  "Seconds of IDLE after which a session collapses into a summary line.
+nil keeps every session visible.  `i' toggles showing them."
+  :type '(choice (integer :tag "Seconds") (const :tag "Never" nil))
+  :group 'vterm-ai)
+
+(defface vterm-ai-card-asking
+  '((((background dark)) :background "#3a2f05")
+    (t :background "#fff3cc"))
+  "Background of cards waiting on the user."
+  :group 'vterm-ai)
+
+(defface vterm-ai-card-done
+  '((((background dark)) :background "#0f2e1b")
+    (t :background "#e4f4e8"))
+  "Background of cards that finished a turn."
+  :group 'vterm-ai)
+
+(defvar-local vterm-ai-dashboard--show-stale nil
+  "Non-nil to show sessions that have been IDLE for a long time.")
+
 (defcustom vterm-ai-dashboard-osc-debounce 0.3
   "Seconds to gather OSC 7501 status changes before one redraw."
   :type 'number
@@ -75,7 +103,8 @@ regardless of this interval."
 
 (defconst vterm-ai-dashboard--keybinding-hint
   '((("RET" . "Open") ("o" . "Other Win") ("d" . "Dired") ("D" . "Detail"))
-    (("g" . "Refresh") ("n/p" . "Next/Prev") ("q" . "Quit")))
+    (("g" . "Refresh") ("n/p" . "Next/Prev") ("q" . "Quit"))
+    (("i" . "Quiet idle") ("v" . "Compact/Full")))
   "Rows of (KEY . DESCRIPTION) shown as a hint below the header line.
 Each inner list is rendered on its own line, since vterm-ai is meant
 to be used in narrow windows.")
@@ -219,10 +248,63 @@ Sessions with the same status keep their relative order."
    ((equal mode "default") "Default")
    (t mode)))
 
+(defun vterm-ai-dashboard--card-format (session)
+  "Return how SESSION's card is drawn: `full', `detail', `busy', or `line'.
+In the compact view, cards that need a look (ASKING, DONE, ERROR) get
+details, BUSY gets what it is doing, and the rest get a single line."
+  (let ((status (vterm-ai-session-status session)))
+    (cond
+     ((not vterm-ai-dashboard-compact) 'full)
+     ((member status '("waiting" "done" "error")) 'detail)
+     ((equal status "busy") 'busy)
+     (t 'line))))
+
+(defun vterm-ai-dashboard--stale-p (session)
+  "Return non-nil if SESSION has been IDLE for `vterm-ai-dashboard-stale-after'.
+A session with no known start of the state is never stale."
+  (let ((since (vterm-ai-session-state-since session)))
+    (and vterm-ai-dashboard-stale-after
+         since
+         (equal (vterm-ai-session-status session) "idle")
+         (> (- (float-time) since) vterm-ai-dashboard-stale-after))))
+
+(defun vterm-ai-dashboard--reply-lines (text)
+  "Return the display lines of reply TEXT without Markdown scaffolding."
+  (let (lines)
+    (dolist (line (split-string (or text "") "[\n\r]+"))
+      (let ((clean (string-trim
+                    (replace-regexp-in-string "\\`[ \t]*#+[ \t]+" "" line))))
+        (unless (or (string-empty-p clean)
+                    (string-match-p "\\`\\(?:```\\|~~~\\)" clean))
+          (push clean lines))))
+    (nreverse lines)))
+
+(defun vterm-ai-dashboard--insert-field (label lines width max-lines)
+  "Insert LABEL and LINES wrapped to WIDTH, at most MAX-LINES screen lines.
+LINES is a string or a list of strings.  Cut text ends with an ellipsis."
+  (let* ((indent (make-string (length label) ?\s))
+         (text-width (max 1 (- width (length label) 2)))
+         (source (if (listp lines)
+                     lines
+                   (list (replace-regexp-in-string "[\n\r]+" " " lines))))
+         (wrapped (cl-mapcan
+                   (lambda (line)
+                     (split-string (vterm-ai-dashboard--wrap-text line text-width)
+                                   "\n" t))
+                   source))
+         (shown (seq-take wrapped max-lines)))
+    (when (and shown (> (length wrapped) max-lines))
+      (setcar (last shown) (concat (car (last shown)) " …")))
+    (insert (propertize label 'face 'vterm-ai-label) (or (car shown) "") "\n")
+    (dolist (line (cdr shown))
+      (insert indent line "\n"))))
+
 (defun vterm-ai-dashboard--render-session (session width)
-  "Render SESSION as a multi-line card into the current buffer.
-WIDTH is the available window width."
-  (let* ((status (vterm-ai-session-status session))
+  "Render SESSION as a card into the current buffer.
+WIDTH is the available window width.  The card's shape follows
+`vterm-ai-dashboard--card-format'."
+  (let* ((shape (vterm-ai-dashboard--card-format session))
+         (status (vterm-ai-session-status session))
          (has-buffer (vterm-ai-session-vterm-buffer session))
          (status-face (if has-buffer
                           (vterm-ai-dashboard--status-face status)
@@ -233,11 +315,10 @@ WIDTH is the available window width."
          (mode-display (vterm-ai-dashboard--mode-display
                         (vterm-ai-session-mode session)))
          (prompt (or (vterm-ai-session-last-prompt session) ""))
-         (prompt-clean (replace-regexp-in-string "[\n\r]+" " " prompt))
-         (prompt-indent (make-string (length "Prompt: ") ?\s))
-         (text-width (max 1 (- width (length prompt-indent) 2)))
+         (activity (vterm-ai-session-activity session))
+         (reply (vterm-ai-session-last-reply session))
          (start (point)))
-    ;; Line 1: [STATUS ELAPSED] type: title
+    ;; Line 1: [STATUS ELAPSED] type: title {mode}
     (insert (vterm-ai-dashboard--label-string
              status (vterm-ai-session-state-since session) status-face)
             " "
@@ -247,40 +328,39 @@ WIDTH is the available window width."
                             (or (vterm-ai-session-name session) "")
                           title)
                         'face 'vterm-ai-session-name)
+            ;; A non-default permission mode must stay visible in every shape.
+            (if (and mode-display (not (eq shape 'full))
+                     (not (equal mode-display "Default")))
+                (propertize (format " {%s}" mode-display) 'face 'vterm-ai-label)
+              "")
             "\n")
-    ;; Path
-    (insert (propertize "Path: " 'face 'vterm-ai-label) cwd "\n")
-    ;; Model
-    (unless (string-empty-p model)
-      (insert (propertize "Model: " 'face 'vterm-ai-label) model "\n"))
-    ;; Mode (only when not normal)
-    (when mode-display
-      (insert (propertize "Mode: " 'face 'vterm-ai-label) mode-display "\n"))
-    ;; Now: what the agent reports it is doing or waiting on (OSC 7501)
-    (let ((activity (vterm-ai-session-activity session)))
-      (when (and activity (not (string-empty-p activity)))
-        (let* ((now-indent (make-string (length "Now: ") ?\s))
-               (lines (seq-take
-                       (split-string
-                        (vterm-ai-dashboard--wrap-text
-                         activity (max 1 (- width (length now-indent) 2)))
-                        "\n")
-                       2)))
-          (insert (propertize "Now: " 'face 'vterm-ai-label) (car lines) "\n")
-          (dolist (line (cdr lines))
-            (insert now-indent line "\n")))))
-    ;; Prompt (wrapped to ~3 lines)
-    (if (string-empty-p prompt-clean)
-        (insert (propertize "Prompt: " 'face 'vterm-ai-label)
-                (propertize "(none)" 'face 'vterm-ai-label)
-                "\n")
-      (let* ((wrapped (vterm-ai-dashboard--wrap-text prompt-clean text-width))
-             (lines (split-string wrapped "\n"))
-             (lines (seq-take lines 3)))
-        (insert (propertize "Prompt: " 'face 'vterm-ai-label))
-        (insert (car lines) "\n")
-        (dolist (line (cdr lines))
-          (insert prompt-indent line "\n"))))
+    (pcase shape
+      ('full
+       (insert (propertize "Path: " 'face 'vterm-ai-label) cwd "\n")
+       (unless (string-empty-p model)
+         (insert (propertize "Model: " 'face 'vterm-ai-label) model "\n"))
+       (when mode-display
+         (insert (propertize "Mode: " 'face 'vterm-ai-label) mode-display "\n"))
+       (when (and activity (not (string-empty-p activity)))
+         (vterm-ai-dashboard--insert-field "Now: " activity width 2))
+       (when (and reply (equal status "done"))
+         (vterm-ai-dashboard--insert-field
+          "Reply: " (vterm-ai-dashboard--reply-lines reply) width 3))
+       (vterm-ai-dashboard--insert-field
+        "Prompt: " (if (string-empty-p prompt) "(none)" prompt) width 3))
+      ('detail
+       (insert (propertize "Path: " 'face 'vterm-ai-label) cwd "\n")
+       (when (and activity (not (string-empty-p activity))
+                  (member status '("waiting" "error")))
+         (vterm-ai-dashboard--insert-field "Now: " activity width 2))
+       (when (and reply (equal status "done"))
+         (vterm-ai-dashboard--insert-field
+          "Reply: " (vterm-ai-dashboard--reply-lines reply) width 3))
+       (unless (string-empty-p prompt)
+         (vterm-ai-dashboard--insert-field "Prompt: " prompt width 1)))
+      ('busy
+       (when (and activity (not (string-empty-p activity)))
+         (vterm-ai-dashboard--insert-field "Now: " activity width 1))))
     ;; Subagents reported as OSC 7501 child records
     (dolist (child (vterm-ai-session-children session))
       (let* ((child-status (vterm-ai-data-osc-status (plist-get child :state)))
@@ -293,6 +373,12 @@ WIDTH is the available window width."
                 " "
                 (truncate-string-to-width label (max 1 (- width 20)) nil nil "…")
                 "\n")))
+    ;; Tint the cards that want a look; existing foreground faces win.
+    (let ((tint (pcase status
+                  ("waiting" 'vterm-ai-card-asking)
+                  ("done" 'vterm-ai-card-done))))
+      (when tint
+        (add-face-text-property start (point) tint t)))
     ;; Tag the entire region with the session
     (put-text-property start (point) 'vterm-ai-session session)))
 
@@ -327,13 +413,20 @@ WIDTH is the available window width."
     (if (null sessions)
         (insert (propertize "No active AI agent sessions found.\n"
                             'face 'vterm-ai-label))
-      (let ((first t))
-        (dolist (session sessions)
-          (if first
-              (setq first nil)
-            (insert (propertize (make-string sep-width ?─)
-                                'face 'vterm-ai-separator)
-                    "\n"))
+      (let* ((stale (cl-remove-if-not #'vterm-ai-dashboard--stale-p sessions))
+             (shown (if vterm-ai-dashboard--show-stale
+                        sessions
+                      (cl-remove-if #'vterm-ai-dashboard--stale-p sessions)))
+             (prev-format nil))
+        (dolist (session shown)
+          ;; One-line cards in a row need no rule between them.
+          (let ((shape (vterm-ai-dashboard--card-format session)))
+            (when (and prev-format
+                       (not (and (eq shape 'line) (eq prev-format 'line))))
+              (insert (propertize (make-string sep-width ?─)
+                                  'face 'vterm-ai-separator)
+                      "\n"))
+            (setq prev-format shape))
           ;; A single malformed session (e.g. a provider surfacing an
           ;; unexpected value from its data source) must not blank out
           ;; the entire dashboard for every other session.
@@ -343,7 +436,16 @@ WIDTH is the available window width."
              (insert (propertize
                       (format "[ERROR] rendering session failed: %s\n"
                               (error-message-string err))
-                      'face 'vterm-ai-status-asking)))))))
+                      'face 'vterm-ai-status-asking)))))
+        ;; Sessions quiet for a long time collapse into one line.
+        (when stale
+          (insert (propertize
+                   (format (if vterm-ai-dashboard--show-stale
+                               "… %d quiet idle shown (%dm+)  i:hide\n"
+                             "… %d quiet idle hidden (%dm+)  i:show\n")
+                           (length stale)
+                           (/ vterm-ai-dashboard-stale-after 60))
+                   'face 'vterm-ai-label)))))
     ;; Restore cursor position
     (goto-char (point-min))
     (if saved-session
@@ -440,7 +542,13 @@ also run a full collection to discover it."
       (with-current-buffer buf
         (if unknown
             (vterm-ai-dashboard--refresh)
-          (mapc #'vterm-ai-data-apply-osc vterm-ai-dashboard--sessions)
+          (dolist (session vterm-ai-dashboard--sessions)
+            (let ((before (vterm-ai-session-status session)))
+              (vterm-ai-data-apply-osc session)
+              ;; Just finished: read the reply now, not at the next collection.
+              (when (and (equal (vterm-ai-session-status session) "done")
+                         (not (equal before "done")))
+                (vterm-ai-data-reenrich session))))
           (setq vterm-ai-dashboard--sessions
                 (vterm-ai-dashboard--sort-sessions vterm-ai-dashboard--sessions))
           (vterm-ai-dashboard--relayout))))))
@@ -566,9 +674,23 @@ also run a full collection to discover it."
     (define-key map (kbd "g") #'vterm-ai-dashboard-revert)
     (define-key map (kbd "n") #'vterm-ai-next-session)
     (define-key map (kbd "p") #'vterm-ai-prev-session)
+    (define-key map (kbd "i") #'vterm-ai-dashboard-toggle-quiet-idle)
+    (define-key map (kbd "v") #'vterm-ai-dashboard-toggle-compact)
     (define-key map (kbd "q") #'quit-window)
     map)
   "Keymap for `vterm-ai-dashboard-mode'.")
+
+(defun vterm-ai-dashboard-toggle-quiet-idle ()
+  "Show or hide sessions that have been IDLE for a long time."
+  (interactive)
+  (setq vterm-ai-dashboard--show-stale (not vterm-ai-dashboard--show-stale))
+  (vterm-ai-dashboard--relayout))
+
+(defun vterm-ai-dashboard-toggle-compact ()
+  "Switch this dashboard between the compact and the full card view."
+  (interactive)
+  (setq-local vterm-ai-dashboard-compact (not vterm-ai-dashboard-compact))
+  (vterm-ai-dashboard--relayout))
 
 (defun vterm-ai-dashboard-revert ()
   "Manually refresh the dashboard."

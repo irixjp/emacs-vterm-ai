@@ -236,9 +236,10 @@ last-prompt, small user messages, and small assistant messages (for model)."
                               (and (progn (goto-char beg)
                                          (search-forward "\"type\":\"user\"" end t))
                                    (< len 32768))
+                              ;; Larger cap: a long final reply is one line.
                               (and (progn (goto-char beg)
                                          (search-forward "\"type\":\"assistant\"" end t))
-                                   (< len 32768)))))
+                                   (< len 262144)))))
                   (when relevant
                     (let ((line (buffer-substring-no-properties beg end)))
                       (condition-case nil
@@ -258,12 +259,14 @@ last-prompt, small user messages, and small assistant messages (for model)."
 
 (defun vterm-ai-claude--read-tail-expanding (file)
   "Read tail entries from FILE, growing the window backward when the
-title is not found in the initial (lightweight) window.
+title or the last reply is not found in the initial (lightweight) window.
 
 A single busy conversation turn can push the most recent ai-title
 past a small fixed-size tail window (see `vterm-ai-claude--read-tail'),
 which would otherwise make the title look empty until the next
-unrelated transcript change shifts the window.  Retrying with a
+unrelated transcript change shifts the window.  The last reply needs
+the same: a large attachment entry written right after it can push it
+out of the window.  Retrying with a
 larger window is bounded by `vterm-ai-claude--tail-max-attempts' so a
 transcript that genuinely has no title yet does not get re-read in
 full on every enrich cycle."
@@ -274,7 +277,9 @@ full on every enrich cycle."
         entries)
     (while (progn
              (setq entries (vterm-ai-claude--read-tail file bytes))
-             (and (not (alist-get 'title (vterm-ai-claude--extract-summary entries)))
+             (and (let ((summary (vterm-ai-claude--extract-summary entries)))
+                    (not (and (alist-get 'title summary)
+                              (alist-get 'last-reply summary))))
                   (< attempts vterm-ai-claude--tail-max-attempts)
                   (< bytes (or size 0))))
       (setq bytes (* bytes vterm-ai-claude--tail-growth-factor))
@@ -294,8 +299,10 @@ full on every enrich cycle."
    (t "")))
 
 (defun vterm-ai-claude--extract-summary (entries)
-  "Extract title, last-prompt, and model from ENTRIES."
-  (let (title last-prompt last-human-prompt model)
+  "Extract title, last-prompt, model, and last reply from ENTRIES.
+The last reply is the text of the newest assistant message that ended
+its turn (`end_turn'), i.e. what the agent finally said."
+  (let (title last-prompt last-human-prompt model reply)
     (dolist (entry (reverse entries))
       (let ((type (alist-get 'type entry)))
         (cond
@@ -303,9 +310,16 @@ full on every enrich cycle."
           (setq title (alist-get 'aiTitle entry)))
          ((and (not last-prompt) (equal type "last-prompt"))
           (setq last-prompt (alist-get 'lastPrompt entry)))
-         ((and (not model) (equal type "assistant"))
+         ((equal type "assistant")
           (let ((msg (alist-get 'message entry)))
-            (setq model (alist-get 'model msg))))
+            (unless model
+              (setq model (alist-get 'model msg)))
+            (when (and (not reply)
+                       (equal (alist-get 'stop_reason msg) "end_turn"))
+              (let ((text (string-trim (vterm-ai-claude--extract-text
+                                        (alist-get 'content msg)))))
+                (unless (string-empty-p text)
+                  (setq reply text))))))
          ((and (not last-human-prompt) (equal type "user")
                (not (alist-get 'toolUseResult entry)))
           (let* ((msg (alist-get 'message entry))
@@ -315,7 +329,8 @@ full on every enrich cycle."
               (setq last-human-prompt text)))))))
     `((title . ,title)
       (last-prompt . ,(or last-human-prompt last-prompt))
-      (model . ,model))))
+      (model . ,model)
+      (last-reply . ,reply))))
 
 (defun vterm-ai-claude--read-permission-mode (file)
   "Read the last permission-mode value from FILE.
@@ -402,7 +417,7 @@ Only a unique candidate is accepted at each step."
 ;;; --- Enrichment cache ---
 
 (defvar vterm-ai-claude--enrich-cache (make-hash-table :test 'equal)
-  "Cache keyed by session-id.  Values: (mtime title last-prompt model mode).")
+  "Cache keyed by session-id.  Values: (mtime title last-prompt model mode reply).")
 
 ;;; --- Provider interface ---
 
@@ -420,7 +435,8 @@ Uses file modification time to skip re-reading unchanged files."
               (setf (vterm-ai-session-title session) (nth 0 data))
               (setf (vterm-ai-session-last-prompt session) (nth 1 data))
               (setf (vterm-ai-session-model session) (nth 2 data))
-              (setf (vterm-ai-session-mode session) (nth 3 data)))
+              (setf (vterm-ai-session-mode session) (nth 3 data))
+              (setf (vterm-ai-session-last-reply session) (nth 4 data)))
           (let* ((entries (vterm-ai-claude--read-tail-expanding file))
                  (summary (vterm-ai-claude--extract-summary entries))
                  (name (or (vterm-ai-session-name session) ""))
@@ -434,12 +450,14 @@ Uses file modification time to skip re-reading unchanged files."
                           title-from-transcript))
                  (prompt (or (alist-get 'last-prompt summary) ""))
                  (model (or (alist-get 'model summary) ""))
-                 (mode (or (vterm-ai-claude--read-permission-mode file) "")))
+                 (mode (or (vterm-ai-claude--read-permission-mode file) ""))
+                 (reply (alist-get 'last-reply summary)))
             (setf (vterm-ai-session-title session) title)
             (setf (vterm-ai-session-last-prompt session) prompt)
             (setf (vterm-ai-session-model session) model)
             (setf (vterm-ai-session-mode session) mode)
-            (puthash sid (cons mtime (list title prompt model mode))
+            (setf (vterm-ai-session-last-reply session) reply)
+            (puthash sid (cons mtime (list title prompt model mode reply))
                      vterm-ai-claude--enrich-cache))))
       (unless (vterm-ai-session-vterm-buffer session)
         (let ((fallback (vterm-ai-claude--find-vterm-buffer-fallback session)))

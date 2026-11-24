@@ -18,13 +18,13 @@ no -wal/-shm files, like a home whose last Codex exited cleanly."
               "PRAGMA journal_mode=WAL;"
               "CREATE TABLE threads (id TEXT, model TEXT, name TEXT, title TEXT,"
               " approval_mode TEXT, first_user_message TEXT, cwd TEXT,"
-              " archived INTEGER, source TEXT, updated_at INTEGER);"
+              " archived INTEGER, source TEXT, updated_at INTEGER, rollout_path TEXT);"
               (mapconcat
                (lambda (r)
-                 (format "INSERT INTO threads VALUES ('%s','gpt-x',NULL,'%s','on-request','first','%s',0,'%s',%d);"
+                 (format "INSERT INTO threads VALUES ('%s','gpt-x',NULL,'%s','on-request','first','%s',0,'%s',%d,'/r/%s.jsonl');"
                          (nth 0 r) (nth 4 r)
                          (replace-regexp-in-string "'" "''" (nth 2 r))
-                         (nth 1 r) (nth 3 r)))
+                         (nth 1 r) (nth 3 r) (nth 0 r)))
                rows "")
               "PRAGMA wal_checkpoint(TRUNCATE);")))
     (should (zerop (call-process "sqlite3" nil nil nil db sql)))
@@ -69,6 +69,24 @@ no -wal/-shm files, like a home whose last Codex exited cleanly."
           (should-not (file-exists-p (expand-file-name "state_5.sqlite-shm" home-b)))
           (should-not (vterm-ai-codex--query-thread "/nowhere")))
       (delete-directory root t))))
+
+
+(ert-deftest vterm-ai-codex-test-read-last-reply ()
+  (let ((file (make-temp-file "rollout" nil ".jsonl")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/w\"}}\n"
+                    "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"last_agent_message\":\"一回目\"}}\n"
+                    "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"last_agent_message\":\"  二回目の応答です。\\n次の行  \"}}\n"
+                    "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n"))
+          ;; The newest finished turn wins, trimmed; a later unfinished turn is ignored.
+          (should (equal (vterm-ai-codex--read-last-reply file) "二回目の応答です。\n次の行"))
+          ;; A tail cut mid-file still finds it.
+          (let ((vterm-ai-codex--rollout-tail-bytes 200))
+            (should (equal (vterm-ai-codex--read-last-reply file) "二回目の応答です。\n次の行")))
+          (should-not (vterm-ai-codex--read-last-reply "/nonexistent.jsonl")))
+      (delete-file file))))
 
 (provide 'vterm-ai-codex-test)
 ;;; vterm-ai-codex-test.el ends here

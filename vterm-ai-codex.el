@@ -173,7 +173,8 @@ while blocked on the user, and the project name alone when idle.
 ;;; --- Thread query ---
 
 (defvar vterm-ai-codex--enrich-cache (make-hash-table :test 'equal)
-  "Cache keyed by cwd.  Values: (mtime session-id title model mode last-prompt).")
+  "Cache keyed by cwd.
+Values: (mtime session-id title model mode last-prompt rollout).")
 
 (defun vterm-ai-codex--query-thread (cwd)
   "Find the most recent interactive Codex thread for CWD in every home.
@@ -185,11 +186,11 @@ and home, or nil."
     (dolist (home vterm-ai-codex-homes)
       (let ((out (vterm-ai-codex--sqlite
                   (vterm-ai-codex--db-file home vterm-ai-codex--state-db)
-                  (format "SELECT id, COALESCE(model, ''), COALESCE(name, title), approval_mode, replace(replace(first_user_message, char(10), ' '), char(9), ' '), updated_at FROM threads WHERE cwd = %s AND archived = 0 AND source = 'cli' ORDER BY updated_at DESC LIMIT 1;"
+                  (format "SELECT id, COALESCE(model, ''), COALESCE(name, title), approval_mode, replace(replace(first_user_message, char(10), ' '), char(9), ' '), updated_at, rollout_path FROM threads WHERE cwd = %s AND archived = 0 AND source = 'cli' ORDER BY updated_at DESC LIMIT 1;"
                           (vterm-ai-codex--sql-quote cwd)))))
         (when out
           (let ((parts (split-string (car (split-string out "\n")) "\t")))
-            (when (>= (length parts) 6)
+            (when (>= (length parts) 7)
               (let ((updated (string-to-number (nth 5 parts))))
                 (when (or (null best-updated) (> updated best-updated))
                   (setq best-updated updated
@@ -198,11 +199,47 @@ and home, or nil."
                                (title . ,(nth 2 parts))
                                (mode . ,(vterm-ai-codex--map-approval-mode (nth 3 parts)))
                                (first-user-message . ,(nth 4 parts))
+                               (rollout . ,(nth 6 parts))
                                (home . ,home))))))))))
     (when best
       (puthash (alist-get 'session-id best) (alist-get 'home best)
                vterm-ai-codex--thread-homes))
     best))
+
+;;; --- Last reply from the rollout file ---
+
+(defconst vterm-ai-codex--rollout-tail-bytes 262144
+  "How much of a rollout file's end to scan for the last finished turn.")
+
+(defun vterm-ai-codex--read-last-reply (rollout)
+  "Return the last agent message of the newest finished turn in ROLLOUT.
+Codex writes a `task_complete' event carrying `last_agent_message' when
+a turn ends.  Return nil when ROLLOUT is unreadable or has none."
+  (when (and (stringp rollout) (file-readable-p rollout))
+    (with-temp-buffer
+      (let* ((size (file-attribute-size (file-attributes rollout)))
+             (beg (max 0 (- size vterm-ai-codex--rollout-tail-bytes))))
+        (insert-file-contents-literally rollout nil beg size)
+        (decode-coding-region (point-min) (point-max) 'utf-8)
+        (goto-char (point-max))
+        (let (reply)
+          (while (and (not reply)
+                      (search-backward "\"task_complete\"" nil t))
+            (let ((line (buffer-substring-no-properties
+                         (line-beginning-position) (line-end-position))))
+              (setq reply
+                    (condition-case nil
+                        (let* ((obj (json-parse-string line :object-type 'alist
+                                                       :null-object nil))
+                               (payload (alist-get 'payload obj))
+                               (msg (alist-get 'last_agent_message payload)))
+                          (and (equal (alist-get 'type payload) "task_complete")
+                               (stringp msg)
+                               (not (string-empty-p (string-trim msg)))
+                               (string-trim msg)))
+                      (error nil)))
+              (beginning-of-line)))
+          reply)))))
 
 ;;; --- Last prompt from thread history ---
 
@@ -252,7 +289,9 @@ Return the message text, or nil."
           (setf (vterm-ai-session-title session) (nth 1 data))
           (setf (vterm-ai-session-model session) (nth 2 data))
           (setf (vterm-ai-session-mode session) (nth 3 data))
-          (setf (vterm-ai-session-last-prompt session) (nth 4 data)))
+          (setf (vterm-ai-session-last-prompt session) (nth 4 data))
+          (setf (vterm-ai-session-last-reply session)
+                (vterm-ai-codex--read-last-reply (nth 5 data))))
       (let ((info (vterm-ai-codex--query-thread cwd)))
         (if info
             (let* ((sid (alist-get 'session-id info))
@@ -261,13 +300,17 @@ Return the message text, or nil."
                    (mode (or (alist-get 'mode info) ""))
                    (last-prompt (or (vterm-ai-codex--query-last-prompt sid)
                                     (alist-get 'first-user-message info)
-                                    "")))
+                                    ""))
+                   (rollout (alist-get 'rollout info)))
               (setf (vterm-ai-session-session-id session) sid)
               (setf (vterm-ai-session-title session) title)
               (setf (vterm-ai-session-model session) model)
               (setf (vterm-ai-session-mode session) mode)
               (setf (vterm-ai-session-last-prompt session) last-prompt)
-              (puthash cwd (cons mtime (list sid title model mode last-prompt))
+              ;; Read on every enrich: the rollout changes without the DB mtime.
+              (setf (vterm-ai-session-last-reply session)
+                    (vterm-ai-codex--read-last-reply rollout))
+              (puthash cwd (cons mtime (list sid title model mode last-prompt rollout))
                        vterm-ai-codex--enrich-cache))
           (setf (vterm-ai-session-last-prompt session) "(not available)"))))))
 
