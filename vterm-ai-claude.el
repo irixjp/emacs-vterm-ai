@@ -112,10 +112,11 @@ present and its pid is still live; otherwise \"running\"."
               (when (and (integerp pid)
                          (vterm-ai-claude--live-claude-p pid)
                          (not (vterm-ai-claude--skip-session-p obj)))
-                (setf (alist-get 'status obj)
-                      (or (vterm-ai-claude--read-hook-status
-                           dir (alist-get 'sessionId obj))
-                          "running"))
+                (let ((hook (vterm-ai-claude--read-hook-status
+                             dir (alist-get 'sessionId obj))))
+                  (setf (alist-get 'status obj) (or hook "running"))
+                  (when hook
+                    (setf (alist-get 'statusSource obj) "hook")))
                 (push obj result)))
           (error nil))))
     (nreverse result)))
@@ -129,7 +130,8 @@ present and its pid is still live; otherwise \"running\"."
       (condition-case nil
           (let* ((r (json-parse-buffer :object-type 'alist))
                  (lst (if (vectorp r) (append r nil) r)))
-            (cl-remove-if #'vterm-ai-claude--skip-session-p lst))
+            (mapcar (lambda (a) (cons '(statusSource . "agents") a))
+                    (cl-remove-if #'vterm-ai-claude--skip-session-p lst)))
         (error nil)))))
 
 (defun vterm-ai-claude--merge-sessions (agents files)

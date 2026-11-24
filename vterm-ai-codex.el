@@ -194,6 +194,7 @@ Return the message text, or nil."
       (let ((parsed (vterm-ai-codex--parse-buffer-name (buffer-name buf))))
         (when parsed
           (setf (vterm-ai-session-status session) (car parsed))
+          (setf (vterm-ai-session-status-source session) "title")
           (setf (vterm-ai-session-title session) (cdr parsed))))))
   (let* ((cwd (vterm-ai-session-cwd session))
          (mtime (vterm-ai-codex--newest-mtime))

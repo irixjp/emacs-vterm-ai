@@ -11,7 +11,8 @@ It periodically collects session information and displays status, model, working
 ## Features
 
 - List all active AI agent sessions with their current state
-- Status display: `IDLE` (waiting for prompt), `BUSY` (working), `ASKING` (waiting for user response), `RUNNING` (process active, state unknown)
+- Status display: `ASKING` (waiting for user response), `DONE` (finished a turn you have not acted on), `IDLE` (waiting for prompt), `BUSY` (working), `ERROR`, `RUNNING` (process active, state unknown), with time spent in the state
+- Show what the agent reports it is doing (`Now:`) and Claude subagents, from the agent's own OSC 7501 status reports
 - Show session title, model name, working directory, and last human prompt
 - Jump to the corresponding vterm buffer with `RET`
 - Asynchronous data collection — does not block Emacs
@@ -87,7 +88,10 @@ Defaults to `~/.claude` (or `$CLAUDE_CONFIG_DIR` if set).
 vterm-ai.el            Entry point, M-x vterm-ai command
 vterm-ai-data.el       Common layer: session struct, provider registry,
                        process tree walking, vterm buffer matching,
-                       async collection with generation control
+                       async collection with generation control,
+                       OSC 7501 overlay onto sessions
+vterm-ai-osc.el        OSC 7501 (Program Status Protocol): answers the
+                       probe in vterm and keeps each buffer's reports
 vterm-ai-claude.el     Claude Code provider: async session discovery
                        via `claude agents --json', JSONL transcript
                        parsing for title / model / last prompt
@@ -116,6 +120,65 @@ To add support for a new agent (e.g. Cursor), create a new file that implements 
 
 ## Notes
 
+### OSC 7501 status reports
+
+Claude Code and Codex report their own state to the terminal with OSC 7501
+(the Program Status Protocol): `idle` / `working` / `done` / `blocked` /
+`error`, the reason for a block (`permission`, `question`, `auth`), a short
+message, and child records for subagents. `vterm-ai-osc-mode` reads these
+reports from vterm's output and the dashboard prefers them over every other
+status source for Claude and Codex sessions.
+
+Claude Code sends nothing until the terminal answers its `ESC ] 7501 ; ?`
+probe, and it probes only once, at startup. vterm does not answer it, so the
+mode adds `:before` advice to `vterm--filter` that answers the probe and
+records the reports. The output handed to vterm is not changed. Turn the mode
+on in your init file so every agent you start is covered:
+
+```emacs-lisp
+(require 'vterm-ai-osc)
+(vterm-ai-osc-mode 1)
+```
+
+`M-x vterm-ai` also turns it on unless `vterm-ai-osc-enable` is nil, but
+Claude sessions started before that keep using the other status sources.
+
+What each agent sends (checked with Claude Code 2.1.330 and Codex 0.170.0):
+
+| | Claude Code | Codex |
+|---|---|---|
+| Needs the probe answered | yes | no |
+| `Now:` text | what it is doing (`Writing foo.el`), what it waits for (`approve Bash: …`, `answer: Q? (A · B)`) | none |
+| Subagents | one child record each, shown under the session | none |
+| After Esc / a denied permission | `idle` right away | `idle` right away |
+
+| OSC 7501 state | Dashboard |
+|---|---|
+| `working` | `BUSY` |
+| `blocked` | `ASKING` |
+| `done` | `DONE` |
+| `idle` | `IDLE` |
+| `error` | `ERROR` |
+
+`DONE` means the agent finished a turn and nothing has happened since. It
+stays until the agent reports another state: your next prompt makes it
+`working`, Esc makes it `idle`.
+
+A report is applied only while the provider still finds a live agent of the
+same kind in that buffer, so a crashed agent that never cleared its record,
+or a buffer that switched from Claude to Codex, does not show a stale state.
+Reports live in memory only: after restarting Emacs a buffer shows its other
+status sources until the agent reports again.
+
+Side effect: once the probe is answered, Claude Code stops putting its
+spinner glyph in the terminal title, and the title becomes a summary of the
+current task. With `vterm-buffer-name-string` set, buffer names change the
+same way. The Claude provider does not read titles, so this does not affect
+the dashboard.
+
+`D` (detail) shows which source the status came from (`osc`, `agents`,
+`hook`, `title`, or `none`).
+
 ### Claude provider
 
 The Claude provider follows `claude agents --json` for the live session list, but hides two kinds of entries that aren't useful to monitor:
@@ -143,6 +206,12 @@ Two limits of that file:
 - After Esc, or after denying a permission, BUSY / ASKING can sit unchanged until the next prompt. Nothing fires a hook for those.
 
 When Agent View is enabled again, `claude agents --json` wins for a session that appears in both places, including its `waiting` status. The hook file is not consulted for that record.
+
+OSC 7501 reports win over both, and fix the two limits above for sessions
+started under `vterm-ai-osc-mode`. The hook file is meant to be phased out:
+it stays only for sessions without OSC 7501 reports (started before the mode
+was on, or outside vterm), and can be removed once the reports have proven
+reliable in daily use.
 
 ### Codex provider (experimental)
 

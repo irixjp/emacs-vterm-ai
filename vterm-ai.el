@@ -34,6 +34,14 @@ Available providers: claude, codex, cursor, opencode."
   :type 'integer
   :group 'vterm-ai)
 
+(defcustom vterm-ai-osc-enable t
+  "When non-nil, `vterm-ai' turns on `vterm-ai-osc-mode'.
+Claude Code probes for OSC 7501 support only at startup, so sessions
+started before the mode is on keep using hooks and titles.  Turn the
+mode on in your init file to cover every session."
+  :type 'boolean
+  :group 'vterm-ai)
+
 (defun vterm-ai--load-providers ()
   "Load provider modules listed in `vterm-ai-enabled-providers'."
   (dolist (provider vterm-ai-enabled-providers)
@@ -44,6 +52,8 @@ Available providers: claude, codex, cursor, opencode."
   "Open the vterm-ai dashboard."
   (interactive)
   (vterm-ai--load-providers)
+  (when (and vterm-ai-osc-enable (not vterm-ai-osc-mode))
+    (vterm-ai-osc-mode 1))
   (let ((buf (get-buffer-create "*vterm-ai*")))
     (with-current-buffer buf
       (unless (eq major-mode 'vterm-ai-dashboard-mode)

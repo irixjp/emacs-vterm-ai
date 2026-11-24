@@ -25,6 +25,27 @@
   "Face for agent instances waiting for user input."
   :group 'vterm-ai)
 
+(defface vterm-ai-status-done
+  '((t :foreground "deep sky blue" :weight bold))
+  "Face for agent instances that finished a turn the user has not acted on."
+  :group 'vterm-ai)
+
+(defface vterm-ai-status-error
+  '((t :foreground "red" :weight bold))
+  "Face for agent instances that reported an error."
+  :group 'vterm-ai)
+
+(defcustom vterm-ai-dashboard-tick-interval 1
+  "Seconds between redraws that advance elapsed times, or nil to disable.
+Redraws only run while some session shows an elapsed time."
+  :type '(choice (integer :tag "Seconds") (const :tag "Disabled" nil))
+  :group 'vterm-ai)
+
+(defcustom vterm-ai-dashboard-osc-debounce 0.3
+  "Seconds to gather OSC 7501 status changes before one redraw."
+  :type 'number
+  :group 'vterm-ai)
+
 (defface vterm-ai-no-buffer
   '((t :foreground "gray50"))
   "Face for sessions with no linked vterm buffer."
@@ -63,6 +84,15 @@ to be used in narrow windows.")
 (defvar vterm-ai-dashboard--timer nil
   "Refresh timer for the dashboard.")
 
+(defvar vterm-ai-dashboard--tick-timer nil
+  "Timer that redraws elapsed times.")
+
+(defvar vterm-ai-dashboard--osc-timer nil
+  "Pending debounced redraw after OSC 7501 changes.")
+
+(defvar vterm-ai-dashboard--osc-unknown-buffer nil
+  "Non-nil when a changed vterm buffer belongs to no displayed session.")
+
 (defun vterm-ai-dashboard--status-text (status)
   "Return display text for STATUS string."
   (cond
@@ -70,6 +100,8 @@ to be used in narrow windows.")
    ((equal status "busy") "BUSY")
    ((equal status "running") "RUNNING")
    ((equal status "idle") "IDLE")
+   ((equal status "done") "DONE")
+   ((equal status "error") "ERROR")
    (t (upcase (or status "?")))))
 
 (defun vterm-ai-dashboard--status-face (status)
@@ -79,21 +111,41 @@ to be used in narrow windows.")
    ((equal status "busy") 'vterm-ai-status-busy)
    ((equal status "running") 'vterm-ai-status-busy)
    ((equal status "idle") 'vterm-ai-status-idle)
+   ((equal status "done") 'vterm-ai-status-done)
+   ((equal status "error") 'vterm-ai-status-error)
    (t 'default)))
 
 (defun vterm-ai-dashboard--status-sort-priority (status)
   "Return the display sort priority for STATUS.
-Lower values are shown first: ASKING, then IDLE, then BUSY/RUNNING,
+Lower values are shown first: ASKING, DONE, IDLE, then BUSY/RUNNING,
 with any other status shown last."
   (cond
    ((equal status "waiting") 0)
-   ((equal status "idle") 1)
-   ((equal status "busy") 2)
-   ((equal status "running") 2)
-   (t 3)))
+   ((equal status "done") 1)
+   ((equal status "idle") 2)
+   ((equal status "busy") 3)
+   ((equal status "running") 3)
+   (t 4)))
+
+(defun vterm-ai-dashboard--format-elapsed (since)
+  "Return elapsed time from SINCE as M:SS or H:MM:SS, or nil."
+  (when since
+    (let* ((secs (max 0 (floor (- (float-time) since))))
+           (h (/ secs 3600))
+           (m (/ (% secs 3600) 60))
+           (s (% secs 60)))
+      (if (> h 0)
+          (format "%d:%02d:%02d" h m s)
+        (format "%d:%02d" m s)))))
+
+(defun vterm-ai-dashboard--status-label (status since)
+  "Return \"[STATUS ELAPSED]\" text for STATUS that began at SINCE."
+  (let ((elapsed (vterm-ai-dashboard--format-elapsed since)))
+    (format "[%s%s]" (vterm-ai-dashboard--status-text status)
+            (if elapsed (concat " " elapsed) ""))))
 
 (defun vterm-ai-dashboard--sort-sessions (sessions)
-  "Return SESSIONS ordered ASKING, IDLE, BUSY, then everything else.
+  "Return SESSIONS ordered ASKING, DONE, IDLE, BUSY, then everything else.
 Sessions with the same status keep their relative order."
   (let ((indexed (let ((i -1))
                    (mapcar (lambda (s) (cons (cl-incf i) s)) sessions))))
@@ -150,8 +202,9 @@ WIDTH is the available window width."
          (prompt-indent (make-string (length "Prompt: ") ?\s))
          (text-width (max 1 (- width (length prompt-indent) 2)))
          (start (point)))
-    ;; Line 1: [STATUS] type: title
-    (insert (propertize (format "[%s]" (vterm-ai-dashboard--status-text status))
+    ;; Line 1: [STATUS ELAPSED] type: title
+    (insert (propertize (vterm-ai-dashboard--status-label
+                         status (vterm-ai-session-state-since session))
                         'face status-face)
             " "
             (propertize (or (vterm-ai-session-type session) "") 'face 'vterm-ai-label)
@@ -169,6 +222,19 @@ WIDTH is the available window width."
     ;; Mode (only when not normal)
     (when mode-display
       (insert (propertize "Mode: " 'face 'vterm-ai-label) mode-display "\n"))
+    ;; Now: what the agent reports it is doing or waiting on (OSC 7501)
+    (let ((activity (vterm-ai-session-activity session)))
+      (when (and activity (not (string-empty-p activity)))
+        (let* ((now-indent (make-string (length "Now: ") ?\s))
+               (lines (seq-take
+                       (split-string
+                        (vterm-ai-dashboard--wrap-text
+                         activity (max 1 (- width (length now-indent) 2)))
+                        "\n")
+                       2)))
+          (insert (propertize "Now: " 'face 'vterm-ai-label) (car lines) "\n")
+          (dolist (line (cdr lines))
+            (insert now-indent line "\n")))))
     ;; Prompt (wrapped to ~3 lines)
     (if (string-empty-p prompt-clean)
         (insert (propertize "Prompt: " 'face 'vterm-ai-label)
@@ -181,6 +247,18 @@ WIDTH is the available window width."
         (insert (car lines) "\n")
         (dolist (line (cdr lines))
           (insert prompt-indent line "\n"))))
+    ;; Subagents reported as OSC 7501 child records
+    (dolist (child (vterm-ai-session-children session))
+      (let* ((child-status (vterm-ai-data-osc-status (plist-get child :state)))
+             (label (or (plist-get child :title) (plist-get child :msg)
+                        (plist-get child :id))))
+        (insert "  └ "
+                (propertize (vterm-ai-dashboard--status-label
+                             child-status (plist-get child :since))
+                            'face (vterm-ai-dashboard--status-face child-status))
+                " "
+                (truncate-string-to-width label (max 1 (- width 20)) nil nil "…")
+                "\n")))
     ;; Tag the entire region with the session
     (put-text-property start (point) 'vterm-ai-session session)))
 
@@ -251,15 +329,18 @@ WIDTH is the available window width."
         (count-asking (cl-count-if
                        (lambda (s) (equal (vterm-ai-session-status s) "waiting"))
                        sessions))
+        (count-done (cl-count-if
+                     (lambda (s) (equal (vterm-ai-session-status s) "done"))
+                     sessions))
         (count-total (length sessions)))
     (setq header-line-format
-          (let ((base (if (> count-asking 0)
-                          (format " AI Sessions: %d total | %d busy | %d idle | %s"
-                                  count-total count-busy count-idle
-                                  (propertize (format "%d ASKING" count-asking)
-                                              'face 'vterm-ai-status-asking))
-                        (format " AI Sessions: %d total | %d busy | %d idle"
-                                count-total count-busy count-idle))))
+          (let* ((counts (format " AI Sessions: %d total | %d busy | %d idle | %d done"
+                                 count-total count-busy count-idle count-done))
+                 (base (if (> count-asking 0)
+                           (format "%s | %s" counts
+                                   (propertize (format "%d ASKING" count-asking)
+                                               'face 'vterm-ai-status-asking))
+                         counts)))
             (format "%s  [%ds]" base vterm-ai-refresh-interval)))))
 
 (defun vterm-ai-dashboard--refresh ()
@@ -289,17 +370,70 @@ current window width when it changes."
           (vterm-ai-dashboard--refresh))
       (vterm-ai-dashboard--stop-timer))))
 
+;;; --- OSC 7501 driven redraw ---
+
+(defun vterm-ai-dashboard--on-osc-change (buffer)
+  "Schedule one redraw for a reported status change in vterm BUFFER."
+  (when (get-buffer "*vterm-ai*")
+    (unless (cl-some (lambda (s) (eq (vterm-ai-session-vterm-buffer s) buffer))
+                     vterm-ai-dashboard--sessions)
+      (setq vterm-ai-dashboard--osc-unknown-buffer t))
+    (unless (timerp vterm-ai-dashboard--osc-timer)
+      (setq vterm-ai-dashboard--osc-timer
+            (run-with-timer vterm-ai-dashboard-osc-debounce nil
+                            #'vterm-ai-dashboard--osc-redraw)))))
+
+(defun vterm-ai-dashboard--osc-redraw ()
+  "Reapply OSC 7501 records to the displayed sessions and redraw.
+A change in a buffer that no session owns yet means a new agent, so
+also run a full collection to discover it."
+  (setq vterm-ai-dashboard--osc-timer nil)
+  (let ((buf (get-buffer "*vterm-ai*"))
+        (unknown vterm-ai-dashboard--osc-unknown-buffer))
+    (setq vterm-ai-dashboard--osc-unknown-buffer nil)
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (if unknown
+            (vterm-ai-dashboard--refresh)
+          (mapc #'vterm-ai-data-apply-osc vterm-ai-dashboard--sessions)
+          (setq vterm-ai-dashboard--sessions
+                (vterm-ai-dashboard--sort-sessions vterm-ai-dashboard--sessions))
+          (vterm-ai-dashboard--relayout))))))
+
+(defun vterm-ai-dashboard--tick ()
+  "Redraw to advance elapsed times while any session shows one."
+  (let ((buf (get-buffer "*vterm-ai*")))
+    (if (not (buffer-live-p buf))
+        (vterm-ai-dashboard--stop-timer)
+      (with-current-buffer buf
+        (when (and (get-buffer-window buf t)
+                   (cl-some (lambda (s)
+                              (or (vterm-ai-session-state-since s)
+                                  (vterm-ai-session-children s)))
+                            vterm-ai-dashboard--sessions))
+          (vterm-ai-dashboard--relayout))))))
+
 (defun vterm-ai-dashboard--start-timer (interval)
   "Start refresh timer with INTERVAL seconds."
   (vterm-ai-dashboard--stop-timer)
   (setq vterm-ai-dashboard--timer
-        (run-with-timer 0 interval #'vterm-ai-dashboard--refresh-if-alive)))
+        (run-with-timer 0 interval #'vterm-ai-dashboard--refresh-if-alive))
+  (when vterm-ai-dashboard-tick-interval
+    (setq vterm-ai-dashboard--tick-timer
+          (run-with-timer vterm-ai-dashboard-tick-interval
+                          vterm-ai-dashboard-tick-interval
+                          #'vterm-ai-dashboard--tick)))
+  (add-hook 'vterm-ai-osc-change-functions #'vterm-ai-dashboard--on-osc-change))
 
 (defun vterm-ai-dashboard--stop-timer ()
-  "Stop the refresh timer."
-  (when vterm-ai-dashboard--timer
-    (cancel-timer vterm-ai-dashboard--timer)
-    (setq vterm-ai-dashboard--timer nil)))
+  "Stop the refresh, tick, and pending OSC redraw timers."
+  (dolist (sym '(vterm-ai-dashboard--timer
+                 vterm-ai-dashboard--tick-timer
+                 vterm-ai-dashboard--osc-timer))
+    (when (timerp (symbol-value sym))
+      (cancel-timer (symbol-value sym)))
+    (set sym nil))
+  (remove-hook 'vterm-ai-osc-change-functions #'vterm-ai-dashboard--on-osc-change))
 
 (defun vterm-ai-goto-buffer ()
   "Switch to the vterm buffer for the session at point."

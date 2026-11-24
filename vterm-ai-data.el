@@ -9,6 +9,7 @@
 
 (require 'cl-lib)
 (require 'json)
+(require 'vterm-ai-osc)
 
 (cl-defstruct vterm-ai-session
   type
@@ -24,7 +25,14 @@
   title
   last-prompt
   model
-  mode)
+  mode
+  ;; Filled from OSC 7501 reports (see `vterm-ai-data-apply-osc').
+  activity
+  blocked-kind
+  children
+  state-since
+  ;; Where status came from: "osc", "agents", "hook", "title", or nil.
+  status-source)
 
 ;;; --- Provider registry ---
 
@@ -170,6 +178,7 @@ MY-GEN is checked against the current generation to discard stale data."
                              :status (or (alist-get 'status agent) "unknown")
                              :started-at (alist-get 'startedAt agent)
                              :updated-at (alist-get 'updatedAt agent)
+                             :status-source (alist-get 'statusSource agent)
                              :vterm-buffer (vterm-ai-data--find-vterm-buffer
                                             pid ppid-table vterm-table))))
               (when enrich-fn
@@ -182,9 +191,52 @@ MY-GEN is checked against the current generation to discard stale data."
                    (message "vterm-ai: %s enrich failed for %s: %s"
                             type (vterm-ai-session-cwd session)
                             (error-message-string err)))))
+              (vterm-ai-data-apply-osc session)
               (push session sessions)))))
       (setq vterm-ai-data--collect-processes nil)
       (funcall callback (nreverse sessions)))))
+
+;;; --- OSC 7501 overlay ---
+
+(defconst vterm-ai-data--osc-apps
+  '(("claude" . "claude-code") ("codex" . "codex"))
+  "Provider type -> the `app' its agent reports over OSC 7501.")
+
+(defun vterm-ai-data-osc-status (state)
+  "Map an OSC 7501 STATE to a dashboard status string."
+  (pcase state
+    ("working" "busy")
+    ("blocked" "waiting")
+    ("done" "done")
+    ("idle" "idle")
+    ("error" "error")
+    (_ "running")))
+
+(defun vterm-ai-data-apply-osc (session)
+  "Overlay the OSC 7501 report of SESSION's vterm buffer onto SESSION.
+Applied only when the reporting app matches the provider, so a buffer
+that switched agents, or a crashed agent that never cleared its record,
+cannot leak a stale state.  Safe to call repeatedly."
+  (let* ((buf (vterm-ai-session-vterm-buffer session))
+         (app (cdr (assoc (vterm-ai-session-type session) vterm-ai-data--osc-apps)))
+         (root (and app (vterm-ai-osc-state buf))))
+    (cond
+     ((and root (equal (plist-get root :app) app))
+      (setf (vterm-ai-session-status session)
+            (vterm-ai-data-osc-status (plist-get root :state))
+            (vterm-ai-session-activity session) (plist-get root :msg)
+            (vterm-ai-session-blocked-kind session) (plist-get root :kind)
+            (vterm-ai-session-state-since session) (plist-get root :since)
+            (vterm-ai-session-children session) (vterm-ai-osc-children buf)
+            (vterm-ai-session-status-source session) "osc"))
+     ;; The record was cleared (agent exiting) since the last collection.
+     ((equal (vterm-ai-session-status-source session) "osc")
+      (setf (vterm-ai-session-status session) "running"
+            (vterm-ai-session-activity session) nil
+            (vterm-ai-session-blocked-kind session) nil
+            (vterm-ai-session-state-since session) nil
+            (vterm-ai-session-children session) nil
+            (vterm-ai-session-status-source session) nil)))))
 
 ;;; --- Detail dispatch ---
 
@@ -193,9 +245,12 @@ MY-GEN is checked against the current generation to discard stale data."
   (let* ((type (vterm-ai-session-type session))
          (provider (vterm-ai-data--find-provider type))
          (detail-fn (and provider (plist-get provider :detail))))
-    (if detail-fn
-        (funcall detail-fn session)
-      (format "No detail available for provider: %s" type))))
+    (concat
+     (format "Status source: %s\n"
+             (or (vterm-ai-session-status-source session) "none"))
+     (if detail-fn
+         (funcall detail-fn session)
+       (format "No detail available for provider: %s" type)))))
 
 (provide 'vterm-ai-data)
 ;;; vterm-ai-data.el ends here
