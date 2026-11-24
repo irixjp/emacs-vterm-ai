@@ -88,5 +88,89 @@ no -wal/-shm files, like a home whose last Codex exited cleanly."
           (should-not (vterm-ai-codex--read-last-reply "/nonexistent.jsonl")))
       (delete-file file))))
 
+(defun vterm-ai-codex-test--run-hook (home json)
+  "Feed JSON to hooks/codex-activity.sh with CODEX_HOME=HOME."
+  (with-temp-buffer
+    (insert json)
+    (let ((process-environment (cons (concat "CODEX_HOME=" home) process-environment)))
+      (call-process-region (point-min) (point-max) "sh" nil nil nil
+                           (expand-file-name "hooks/codex-activity.sh")))))
+
+(ert-deftest vterm-ai-codex-test-hook-script ()
+  (skip-unless (executable-find "jq"))
+  (let* ((home (make-temp-file "codex-home" t))
+         (file (expand-file-name "vterm-ai-activity/s1" home)))
+    (unwind-protect
+        (cl-flet ((summary ()
+                    (nth 3 (vterm-ai-codex--read-activity-line file))))
+          (vterm-ai-codex-test--run-hook
+           home "{\"session_id\":\"s1\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"\\n  pnpm test\\nmore\"}}")
+          (should (equal (summary) "Bash: pnpm test"))
+          (vterm-ai-codex-test--run-hook
+           home "{\"session_id\":\"s1\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"apply_patch\",\"tool_input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.ts\\n*** Add File: b.ts\\n*** End Patch\"}}")
+          (should (equal (summary) "apply_patch: a.ts, b.ts"))
+          (vterm-ai-codex-test--run-hook
+           home "{\"session_id\":\"s1\",\"hook_event_name\":\"PermissionRequest\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"curl x\\ty\"}}")
+          (should (equal (summary) "approve Bash: curl x y"))
+          (vterm-ai-codex-test--run-hook
+           home "{\"session_id\":\"s1\",\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"ok\"}")
+          (should (equal (car (vterm-ai-codex--read-activity-line file)) "Stop"))
+          (should (equal (summary) ""))
+          ;; A session id that could escape the directory is ignored.
+          (vterm-ai-codex-test--run-hook
+           home "{\"session_id\":\"../x\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\"}")
+          (should-not (file-exists-p (expand-file-name "x" home)))
+          (vterm-ai-codex-test--run-hook
+           home "{\"session_id\":\"s1\",\"hook_event_name\":\"SessionEnd\"}")
+          (should-not (file-exists-p file)))
+      (delete-directory home t))))
+
+(ert-deftest vterm-ai-codex-test-activity-for-session ()
+  (let* ((home (make-temp-file "codex-home" t))
+         (dir (expand-file-name "vterm-ai-activity" home))
+         (now (floor (float-time)))
+         (vterm-ai-codex-homes (list home)))
+    (unwind-protect
+        (progn
+          (make-directory dir t)
+          (with-temp-file (expand-file-name "a" dir)
+            (insert (format "PreToolUse\t%d\t4242\tBash: make\n" now)))
+          (with-temp-file (expand-file-name "b" dir)
+            (insert (format "PreToolUse\t%d\t9999\tother session\n" now)))
+          (let ((s (make-vterm-ai-session :type "codex" :pid 4242 :status "busy"
+                                          :state-since (- now 5))))
+            (should (equal (vterm-ai-codex-activity s) "Bash: make"))
+            ;; A record older than the current state is from a previous turn.
+            (setf (vterm-ai-session-state-since s) (+ now 10))
+            (should-not (vterm-ai-codex-activity s))
+            ;; No OSC state yet: nothing to compare against, so nothing shown.
+            (setf (vterm-ai-session-state-since s) nil)
+            (should-not (vterm-ai-codex-activity s))))
+      (delete-directory home t))))
+
+(ert-deftest vterm-ai-codex-test-apply-osc-uses-hook-activity ()
+  (let* ((home (make-temp-file "codex-home" t))
+         (dir (expand-file-name "vterm-ai-activity" home))
+         (buf (generate-new-buffer " *osc*"))
+         (vterm-ai-codex-homes (list home)))
+    (unwind-protect
+        (progn
+          (make-directory dir t)
+          (with-current-buffer buf
+            (vterm-ai-osc--apply-report '(:id nil :state "working" :app "codex")))
+          (with-temp-file (expand-file-name "a" dir)
+            (insert (format "PreToolUse\t%d\t77\tapply_patch: x.ts\n" (floor (float-time)))))
+          (let ((s (make-vterm-ai-session :type "codex" :pid 77 :vterm-buffer buf)))
+            (vterm-ai-data-apply-osc s)
+            (should (equal (vterm-ai-session-status s) "busy"))
+            (should (equal (vterm-ai-session-activity s) "apply_patch: x.ts"))
+            ;; Once the turn is done the hook record is not shown.
+            (with-current-buffer buf
+              (vterm-ai-osc--apply-report '(:id nil :state "done" :app "codex")))
+            (vterm-ai-data-apply-osc s)
+            (should-not (vterm-ai-session-activity s))))
+      (kill-buffer buf)
+      (delete-directory home t))))
+
 (provide 'vterm-ai-codex-test)
 ;;; vterm-ai-codex-test.el ends here

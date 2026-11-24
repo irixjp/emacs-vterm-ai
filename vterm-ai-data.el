@@ -214,6 +214,20 @@ MY-GEN is checked against the current generation to discard stale data."
     ("error" "error")
     (_ "running")))
 
+(defun vterm-ai-data-provider-activity (session)
+  "Return SESSION's activity from its provider's :activity function, or nil."
+  (let* ((provider (vterm-ai-data--find-provider (vterm-ai-session-type session)))
+         (fn (and provider (plist-get provider :activity))))
+    (when fn
+      (condition-case nil
+          (funcall fn session)
+        (error nil)))))
+
+(defun vterm-ai-data-has-activity-source-p (session)
+  "Return non-nil if SESSION's provider supplies activity of its own."
+  (let ((provider (vterm-ai-data--find-provider (vterm-ai-session-type session))))
+    (and provider (plist-get provider :activity) t)))
+
 (defun vterm-ai-data-apply-osc (session)
   "Overlay the OSC 7501 report of SESSION's vterm buffer onto SESSION.
 Applied only when the reporting app matches the provider, so a buffer
@@ -226,11 +240,15 @@ cannot leak a stale state.  Safe to call repeatedly."
      ((and root (equal (plist-get root :app) app))
       (setf (vterm-ai-session-status session)
             (vterm-ai-data-osc-status (plist-get root :state))
-            (vterm-ai-session-activity session) (plist-get root :msg)
             (vterm-ai-session-blocked-kind session) (plist-get root :kind)
             (vterm-ai-session-state-since session) (plist-get root :since)
             (vterm-ai-session-children session) (vterm-ai-osc-children buf)
-            (vterm-ai-session-status-source session) "osc"))
+            (vterm-ai-session-status-source session) "osc")
+      ;; Agents that report no message (Codex) may have a provider source.
+      (setf (vterm-ai-session-activity session)
+            (or (plist-get root :msg)
+                (and (member (vterm-ai-session-status session) '("busy" "waiting"))
+                     (vterm-ai-data-provider-activity session)))))
      ;; The record was cleared (agent exiting) since the last collection.
      ((equal (vterm-ai-session-status-source session) "osc")
       (setf (vterm-ai-session-status session) "running"

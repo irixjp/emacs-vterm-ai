@@ -241,6 +241,47 @@ a turn ends.  Return nil when ROLLOUT is unreadable or has none."
               (beginning-of-line)))
           reply)))))
 
+;;; --- Activity from the vterm-ai Codex hook ---
+
+(defconst vterm-ai-codex--activity-dir "vterm-ai-activity"
+  "Directory under each CODEX_HOME where hooks/codex-activity.sh writes.")
+
+(defun vterm-ai-codex--read-activity-line (file)
+  "Return (EVENT EPOCH PID SUMMARY) from the first line of FILE, or nil."
+  (with-temp-buffer
+    (insert-file-contents file nil 0 2048)
+    (let ((parts (split-string (buffer-substring-no-properties
+                                (point-min) (line-end-position))
+                               "\t")))
+      (when (>= (length parts) 4)
+        (list (nth 0 parts) (string-to-number (nth 1 parts))
+              (nth 2 parts) (string-trim (nth 3 parts)))))))
+
+(defun vterm-ai-codex-activity (session)
+  "Return what SESSION's Codex is doing, as recorded by its hook, or nil.
+The hook writes one file per Codex session holding the event, its time,
+the Codex pid, and a summary.  The record of SESSION's pid is used only
+if it is no older than the current state, so a summary from a previous
+turn never shows."
+  (let ((pid (and (vterm-ai-session-pid session)
+                  (number-to-string (vterm-ai-session-pid session))))
+        (since (vterm-ai-session-state-since session))
+        best)
+    (when (and pid since)
+      (dolist (home vterm-ai-codex-homes)
+        (let ((dir (expand-file-name vterm-ai-codex--activity-dir
+                                     (expand-file-name home))))
+          (when (file-directory-p dir)
+            (dolist (file (directory-files dir t "\\`[^.]"))
+              (let ((rec (ignore-errors (vterm-ai-codex--read-activity-line file))))
+                (when (and rec (equal (nth 2 rec) pid)
+                           (or (null best) (> (nth 1 rec) (nth 1 best))))
+                  (setq best rec)))))))
+      (when (and best
+                 (>= (nth 1 best) (floor since))
+                 (not (string-empty-p (nth 3 best))))
+        (nth 3 best)))))
+
 ;;; --- Last prompt from thread history ---
 
 (defun vterm-ai-codex--query-prompts (thread-id limit)
@@ -349,7 +390,8 @@ Return a list of message strings, most recent first.  LIMIT defaults to 10."
  '(:name "codex"
    :get-sessions-async vterm-ai-codex--get-sessions-async
    :enrich vterm-ai-codex-enrich
-   :detail vterm-ai-codex-detail))
+   :detail vterm-ai-codex-detail
+   :activity vterm-ai-codex-activity))
 
 (provide 'vterm-ai-codex)
 ;;; vterm-ai-codex.el ends here

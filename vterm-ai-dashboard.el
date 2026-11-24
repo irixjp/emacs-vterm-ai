@@ -44,6 +44,16 @@ regardless of this interval."
   :type '(choice (integer :tag "Seconds") (const :tag "Disabled" nil))
   :group 'vterm-ai)
 
+(defcustom vterm-ai-dashboard-activity-interval 2
+  "Seconds between re-reads of provider activity (Codex's hook record).
+Runs only while the dashboard is visible and a session whose provider
+supplies activity is BUSY or ASKING.  nil disables it."
+  :type '(choice (number :tag "Seconds") (const :tag "Disabled" nil))
+  :group 'vterm-ai)
+
+(defvar vterm-ai-dashboard--activity-timer nil
+  "Timer that re-reads provider activity.")
+
 (defcustom vterm-ai-dashboard-compact t
   "When non-nil, size each card by its state for small windows.
 ASKING, DONE, and ERROR get details, BUSY gets what it is doing, and
@@ -549,7 +559,8 @@ also run a full collection to discover it."
               ;; Just finished: read the reply now, not at the next collection.
               (when (and (equal (vterm-ai-session-status session) "done")
                          (not (equal before "done")))
-                (vterm-ai-data-reenrich session))))
+                (vterm-ai-data-reenrich session)
+                (vterm-ai-dashboard--schedule-reply-recheck session))))
           (setq vterm-ai-dashboard--sessions
                 (vterm-ai-dashboard--sort-sessions vterm-ai-dashboard--sessions))
           (vterm-ai-dashboard--relayout))))))
@@ -563,11 +574,56 @@ also run a full collection to discover it."
         (with-current-buffer buf
           (vterm-ai-dashboard--update-elapsed))))))
 
+(defconst vterm-ai-dashboard--reply-recheck-delays '(1.5 4)
+  "Seconds after a session turns DONE at which its reply is read again.
+An agent may write its final reply after announcing DONE (Codex runs its
+Stop hooks first), so the read at the moment of DONE can miss it.")
+
+(defun vterm-ai-dashboard--schedule-reply-recheck (session)
+  "Read SESSION's reply again a few seconds after it turned DONE."
+  (dolist (delay vterm-ai-dashboard--reply-recheck-delays)
+    (run-at-time delay nil #'vterm-ai-dashboard--recheck-reply session)))
+
+(defun vterm-ai-dashboard--recheck-reply (session)
+  "Re-read SESSION if it is still a displayed DONE session; redraw on change."
+  (let ((buf (get-buffer "*vterm-ai*")))
+    (when (and (buffer-live-p buf)
+               (memq session vterm-ai-dashboard--sessions)
+               (equal (vterm-ai-session-status session) "done"))
+      (let ((before (vterm-ai-session-last-reply session)))
+        (vterm-ai-data-reenrich session)
+        (unless (equal before (vterm-ai-session-last-reply session))
+          (with-current-buffer buf
+            (vterm-ai-dashboard--relayout)))))))
+
+(defun vterm-ai-dashboard--activity-tick ()
+  "Re-read provider activity of BUSY/ASKING sessions; redraw if it changed.
+Codex reports no message over OSC and no state change between tools, so
+its hook record is the only way to follow it within a turn."
+  (let ((buf (get-buffer "*vterm-ai*")))
+    (when (and (buffer-live-p buf) (get-buffer-window buf 'visible))
+      (with-current-buffer buf
+        (let (changed)
+          (dolist (session vterm-ai-dashboard--sessions)
+            (when (and (member (vterm-ai-session-status session) '("busy" "waiting"))
+                       (vterm-ai-data-has-activity-source-p session))
+              (let ((before (vterm-ai-session-activity session)))
+                (vterm-ai-data-apply-osc session)
+                (unless (equal before (vterm-ai-session-activity session))
+                  (setq changed t)))))
+          (when changed
+            (vterm-ai-dashboard--relayout)))))))
+
 (defun vterm-ai-dashboard--start-timer (interval)
   "Start refresh timer with INTERVAL seconds."
   (vterm-ai-dashboard--stop-timer)
   (setq vterm-ai-dashboard--timer
         (run-with-timer 0 interval #'vterm-ai-dashboard--refresh-if-alive))
+  (when vterm-ai-dashboard-activity-interval
+    (setq vterm-ai-dashboard--activity-timer
+          (run-with-timer vterm-ai-dashboard-activity-interval
+                          vterm-ai-dashboard-activity-interval
+                          #'vterm-ai-dashboard--activity-tick)))
   (when vterm-ai-dashboard-tick-interval
     (setq vterm-ai-dashboard--tick-timer
           (run-with-timer vterm-ai-dashboard-tick-interval
@@ -578,6 +634,7 @@ also run a full collection to discover it."
 (defun vterm-ai-dashboard--stop-timer ()
   "Stop the refresh, tick, and pending OSC redraw timers."
   (dolist (sym '(vterm-ai-dashboard--timer
+                 vterm-ai-dashboard--activity-timer
                  vterm-ai-dashboard--tick-timer
                  vterm-ai-dashboard--osc-timer))
     (when (timerp (symbol-value sym))

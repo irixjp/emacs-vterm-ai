@@ -303,6 +303,36 @@ Defaults to `~/.codex`. For a session's working directory, the provider uses the
 
 Process detection only considers processes attached to a controlling terminal, so Codex's background `app-server` daemon (which keeps running independently of any vterm session, with no TTY of its own) is excluded and won't show up as a phantom session.
 
+#### What Codex is doing (`Now:`), from a hook
+
+Codex reports its state over OSC 7501 but no message, and nothing changes
+between tools within a turn. To see the current tool on the `Now:` line
+(`Bash: pnpm test`, `apply_patch: src/a.ts`, `approve Bash: …`), register
+`hooks/codex-activity.sh` in `$CODEX_HOME/hooks.json` of each home:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit":  [{ "hooks": [{ "type": "command", "command": "/path/to/emacs-vterm-ai/hooks/codex-activity.sh", "timeout": 5 }] }],
+    "PreToolUse":        [{ "matcher": "*", "hooks": [{ "type": "command", "command": "/path/to/emacs-vterm-ai/hooks/codex-activity.sh", "timeout": 5, "async": true }] }],
+    "PermissionRequest": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "/path/to/emacs-vterm-ai/hooks/codex-activity.sh", "timeout": 5, "async": true }] }],
+    "Stop":              [{ "hooks": [{ "type": "command", "command": "/path/to/emacs-vterm-ai/hooks/codex-activity.sh", "timeout": 5 }] }],
+    "Interrupt":         [{ "hooks": [{ "type": "command", "command": "/path/to/emacs-vterm-ai/hooks/codex-activity.sh", "timeout": 1 }] }],
+    "SessionEnd":        [{ "hooks": [{ "type": "command", "command": "/path/to/emacs-vterm-ai/hooks/codex-activity.sh", "timeout": 1 }] }]
+  }
+}
+```
+
+Codex runs a new or changed hook only after you trust it: start Codex
+with that `CODEX_HOME` and review the hooks with `/hooks`. The script needs
+`jq`. It overwrites one line per session in
+`$CODEX_HOME/vterm-ai-activity/<session_id>` (event, time, Codex pid,
+summary) and deletes the file on `SessionEnd`; it never blocks or changes
+what Codex does. The dashboard uses the record only for a session whose
+pid matches and only if it is newer than the session's current state, and
+re-reads it every `vterm-ai-dashboard-activity-interval` (2) seconds while
+a Codex session is `BUSY` or `ASKING` and the dashboard is visible.
+
 #### Status from the terminal title
 
 Codex's default terminal title is the activity indicator plus the project name. No `terminal_title` setting is required. vterm copies that title into the buffer name, and the provider maps it as follows:
