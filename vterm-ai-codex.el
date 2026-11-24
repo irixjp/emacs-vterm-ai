@@ -10,14 +10,53 @@
 (require 'json)
 (require 'vterm-ai-data)
 
-(defvar vterm-ai-codex--config-dir
-  (expand-file-name ".codex" (getenv "HOME")))
+(defcustom vterm-ai-codex-homes '("~/.codex")
+  "CODEX_HOME directories to read Codex session data from.
+List every directory you run Codex with (for example one per account),
+in the same way as `vterm-ai-claude-config-dirs'."
+  :type '(repeat directory)
+  :group 'vterm-ai)
 
-(defvar vterm-ai-codex--db-path
-  (expand-file-name "state_5.sqlite" vterm-ai-codex--config-dir))
+(defconst vterm-ai-codex--state-db "state_5.sqlite")
+(defconst vterm-ai-codex--history-db "thread_history_1.sqlite")
 
-(defvar vterm-ai-codex--history-db-path
-  (expand-file-name "thread_history_1.sqlite" vterm-ai-codex--config-dir))
+(defvar vterm-ai-codex--thread-homes (make-hash-table :test 'equal)
+  "Thread id -> the CODEX_HOME whose database holds it.")
+
+;;; --- SQLite access ---
+
+(defun vterm-ai-codex--db-file (home name)
+  "Return the path of database NAME in Codex HOME."
+  (expand-file-name name (expand-file-name home)))
+
+(defun vterm-ai-codex--sqlite-uri (path)
+  "Return a read-only SQLite URI for PATH that never writes beside it.
+A database with a -wal file is opened read-only so committed WAL pages
+are seen.  Without one, read-only mode cannot create the -shm file a
+WAL-mode database needs, so open it immutable instead."
+  (let ((escaped (replace-regexp-in-string
+                  "[%?# ]"
+                  (lambda (c) (format "%%%02X" (string-to-char c)))
+                  path)))
+    (if (file-exists-p (concat path "-wal"))
+        (concat "file:" escaped "?mode=ro")
+      (concat "file:" escaped "?immutable=1"))))
+
+(defun vterm-ai-codex--sqlite (path sql)
+  "Run SQL against the database at PATH read-only.
+Return the trimmed output, or nil on failure or empty output."
+  (when (file-readable-p path)
+    (with-temp-buffer
+      (when (and (zerop (call-process "sqlite3" nil t nil
+                                      "-separator" "\t"
+                                      (vterm-ai-codex--sqlite-uri path)
+                                      sql))
+                 (> (buffer-size) 0))
+        (string-trim (buffer-string))))))
+
+(defun vterm-ai-codex--sql-quote (s)
+  "Quote S as an SQL string literal."
+  (concat "'" (replace-regexp-in-string "'" "''" s) "'"))
 
 ;;; --- Async session discovery ---
 
@@ -137,54 +176,62 @@ while blocked on the user, and the project name alone when idle.
   "Cache keyed by cwd.  Values: (mtime session-id title model mode last-prompt).")
 
 (defun vterm-ai-codex--query-thread (cwd)
-  "Query the Codex SQLite database for the most recent thread matching CWD.
-Return an alist with session-id, title, model, mode, and first-user-message."
-  (when (file-readable-p vterm-ai-codex--db-path)
-    (with-temp-buffer
-      (let ((ret (call-process
-                  "sqlite3" nil t nil
-                  "-separator" "\t"
-                  vterm-ai-codex--db-path
-                  (format "SELECT id, model, COALESCE(name, title), approval_mode, first_user_message FROM threads WHERE cwd = '%s' AND archived = 0 ORDER BY updated_at DESC LIMIT 1;"
-                          (replace-regexp-in-string "'" "''" cwd)))))
-        (when (and (zerop ret) (> (buffer-size) 0))
-          (goto-char (point-min))
-          (let ((parts (split-string (buffer-substring-no-properties
-                                      (point) (line-end-position))
-                                     "\t")))
-            (when (>= (length parts) 5)
-              `((session-id . ,(nth 0 parts))
-                (model . ,(nth 1 parts))
-                (title . ,(nth 2 parts))
-                (mode . ,(vterm-ai-codex--map-approval-mode (nth 3 parts)))
-                (first-user-message . ,(nth 4 parts))))))))))
+  "Find the most recent interactive Codex thread for CWD in every home.
+Only `cli' threads count: `exec' runs (such as codex-request) and
+subagent threads share the cwd but are not the session in the terminal.
+Return an alist with session-id, title, model, mode, first-user-message,
+and home, or nil."
+  (let (best best-updated)
+    (dolist (home vterm-ai-codex-homes)
+      (let ((out (vterm-ai-codex--sqlite
+                  (vterm-ai-codex--db-file home vterm-ai-codex--state-db)
+                  (format "SELECT id, COALESCE(model, ''), COALESCE(name, title), approval_mode, replace(replace(first_user_message, char(10), ' '), char(9), ' '), updated_at FROM threads WHERE cwd = %s AND archived = 0 AND source = 'cli' ORDER BY updated_at DESC LIMIT 1;"
+                          (vterm-ai-codex--sql-quote cwd)))))
+        (when out
+          (let ((parts (split-string (car (split-string out "\n")) "\t")))
+            (when (>= (length parts) 6)
+              (let ((updated (string-to-number (nth 5 parts))))
+                (when (or (null best-updated) (> updated best-updated))
+                  (setq best-updated updated
+                        best `((session-id . ,(nth 0 parts))
+                               (model . ,(nth 1 parts))
+                               (title . ,(nth 2 parts))
+                               (mode . ,(vterm-ai-codex--map-approval-mode (nth 3 parts)))
+                               (first-user-message . ,(nth 4 parts))
+                               (home . ,home))))))))))
+    (when best
+      (puthash (alist-get 'session-id best) (alist-get 'home best)
+               vterm-ai-codex--thread-homes))
+    best))
 
 ;;; --- Last prompt from thread history ---
+
+(defun vterm-ai-codex--query-prompts (thread-id limit)
+  "Return up to LIMIT user messages of THREAD-ID, most recent first."
+  (let ((home (and thread-id (gethash thread-id vterm-ai-codex--thread-homes))))
+    (when home
+      (let ((out (vterm-ai-codex--sqlite
+                  (vterm-ai-codex--db-file home vterm-ai-codex--history-db)
+                  (format "SELECT replace(json_extract(item_json, '$.content[0].text'), char(10), ' ') FROM thread_items WHERE thread_id = %s AND item_type = 'userMessage' ORDER BY rollout_ordinal DESC LIMIT %d;"
+                          (vterm-ai-codex--sql-quote thread-id) limit))))
+        (and out (split-string out "\n" t))))))
 
 (defun vterm-ai-codex--query-last-prompt (thread-id)
   "Query the last user message for THREAD-ID from thread history.
 Return the message text, or nil."
-  (when (and thread-id (file-readable-p vterm-ai-codex--history-db-path))
-    (with-temp-buffer
-      (let ((ret (call-process
-                  "sqlite3" nil t nil
-                  vterm-ai-codex--history-db-path
-                  (format "SELECT json_extract(item_json, '$.content[0].text') FROM thread_items WHERE thread_id = '%s' AND item_type = 'userMessage' ORDER BY rollout_ordinal DESC LIMIT 1;"
-                          (replace-regexp-in-string "'" "''" thread-id)))))
-        (when (and (zerop ret) (> (buffer-size) 0))
-          (string-trim (buffer-string)))))))
+  (car (vterm-ai-codex--query-prompts thread-id 1)))
 
 (defun vterm-ai-codex--newest-mtime ()
-  "Return the newest mtime among Codex database files."
+  "Return the newest mtime among the Codex database files of every home."
   (let (newest)
-    (dolist (path (list vterm-ai-codex--db-path
-                        vterm-ai-codex--history-db-path))
-      (dolist (suffix '("" "-wal"))
-        (let ((f (concat path suffix)))
-          (when (file-exists-p f)
-            (let ((mt (file-attribute-modification-time (file-attributes f))))
-              (when (or (not newest) (time-less-p newest mt))
-                (setq newest mt)))))))
+    (dolist (home vterm-ai-codex-homes)
+      (dolist (name (list vterm-ai-codex--state-db vterm-ai-codex--history-db))
+        (dolist (suffix '("" "-wal"))
+          (let ((f (concat (vterm-ai-codex--db-file home name) suffix)))
+            (when (file-exists-p f)
+              (let ((mt (file-attribute-modification-time (file-attributes f))))
+                (when (or (not newest) (time-less-p newest mt))
+                  (setq newest mt))))))))
     newest))
 
 (defun vterm-ai-codex-enrich (session)
@@ -229,16 +276,7 @@ Return the message text, or nil."
 (defun vterm-ai-codex--query-recent-prompts (thread-id &optional limit)
   "Query recent user messages for THREAD-ID from thread history.
 Return a list of message strings, most recent first.  LIMIT defaults to 10."
-  (when (and thread-id (file-readable-p vterm-ai-codex--history-db-path))
-    (with-temp-buffer
-      (let ((ret (call-process
-                  "sqlite3" nil t nil
-                  vterm-ai-codex--history-db-path
-                  (format "SELECT json_extract(item_json, '$.content[0].text') FROM thread_items WHERE thread_id = '%s' AND item_type = 'userMessage' ORDER BY rollout_ordinal DESC LIMIT %d;"
-                          (replace-regexp-in-string "'" "''" thread-id)
-                          (or limit 10)))))
-        (when (and (zerop ret) (> (buffer-size) 0))
-          (split-string (string-trim (buffer-string)) "\n" t))))))
+  (vterm-ai-codex--query-prompts thread-id (or limit 10)))
 
 ;;; --- Detail ---
 

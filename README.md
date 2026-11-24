@@ -101,7 +101,8 @@ vterm-ai-claude.el     Claude Code provider: async session discovery
                        via `claude agents --json', JSONL transcript
                        parsing for title / model / last prompt
 vterm-ai-codex.el      Codex provider: process detection via ps/lsof,
-                       session info from ~/.codex/state_5.sqlite
+                       session info from state_5.sqlite in each
+                       directory of `vterm-ai-codex-homes'
 vterm-ai-cursor.el     Cursor provider: process detection via ps/lsof,
                        status extraction from vterm buffer names
 vterm-ai-opencode.el   OpenCode provider: process detection via ps/lsof,
@@ -222,7 +223,15 @@ reliable in daily use.
 
 To enable, add `codex` to `vterm-ai-enabled-providers`.
 
-This provider detects Codex processes and retrieves model info from `~/.codex/state_5.sqlite`. Status and project name are extracted from the vterm buffer name.
+This provider detects Codex processes and retrieves the title, model, approval mode, and last prompt from Codex's own databases (`state_5.sqlite`, `thread_history_1.sqlite`). Status and project name are extracted from the vterm buffer name.
+
+If you run Codex with different `CODEX_HOME` values (for example one per account), list every directory, as for Claude:
+
+```emacs-lisp
+(setq vterm-ai-codex-homes '("~/.codex_work" "~/.codex_personal"))
+```
+
+Defaults to `~/.codex`. For a session's working directory, the provider uses the most recently updated interactive (`cli`) thread across all homes. `codex exec` runs and subagent threads in the same directory are ignored. The databases are opened read-only and nothing is written next to them: a database with a `-wal` file is opened with `mode=ro`, and one without (Codex exited cleanly) with `immutable=1`, because read-only mode cannot create the `-shm` file a WAL-mode database needs.
 
 Process detection only considers processes attached to a controlling terminal, so Codex's background `app-server` daemon (which keeps running independently of any vterm session, with no TTY of its own) is excluded and won't show up as a phantom session.
 
