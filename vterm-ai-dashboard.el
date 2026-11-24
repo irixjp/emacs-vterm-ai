@@ -35,9 +35,11 @@
   "Face for agent instances that reported an error."
   :group 'vterm-ai)
 
-(defcustom vterm-ai-dashboard-tick-interval 1
-  "Seconds between redraws that advance elapsed times, or nil to disable.
-Redraws only run while some session shows an elapsed time."
+(defcustom vterm-ai-dashboard-tick-interval 10
+  "Seconds between updates of the elapsed times, or nil to disable.
+Each update rewrites only the elapsed-time labels, and only while the
+dashboard is shown on a visible frame.  State changes redraw at once
+regardless of this interval."
   :type '(choice (integer :tag "Seconds") (const :tag "Disabled" nil))
   :group 'vterm-ai)
 
@@ -144,6 +146,39 @@ with any other status shown last."
     (format "[%s%s]" (vterm-ai-dashboard--status-text status)
             (if elapsed (concat " " elapsed) ""))))
 
+(defun vterm-ai-dashboard--label-string (status since face)
+  "Return the status label for STATUS that began at SINCE, shown in FACE.
+A label with an elapsed time carries SINCE and STATUS as text properties
+so `vterm-ai-dashboard--update-elapsed' can rewrite it in place."
+  (let ((label (propertize (vterm-ai-dashboard--status-label status since)
+                           'face face)))
+    (when since
+      (add-text-properties 0 (length label)
+                           (list 'vterm-ai-since since 'vterm-ai-status status)
+                           label))
+    label))
+
+(defun vterm-ai-dashboard--update-elapsed ()
+  "Rewrite only the elapsed-time labels in the current buffer.
+Labels whose text is unchanged are left alone, so a tick that changes
+nothing modifies nothing."
+  (let ((inhibit-read-only t)
+        (pos (point-min)))
+    (save-excursion
+      (while (setq pos (text-property-not-all pos (point-max) 'vterm-ai-since nil))
+        (let* ((end (or (next-single-property-change pos 'vterm-ai-since)
+                        (point-max)))
+               (new (vterm-ai-dashboard--status-label
+                     (get-text-property pos 'vterm-ai-status)
+                     (get-text-property pos 'vterm-ai-since))))
+          (if (string= new (buffer-substring-no-properties pos end))
+              (setq pos end)
+            (let ((props (text-properties-at pos)))
+              (goto-char pos)
+              (delete-region pos end)
+              (insert (apply #'propertize new props))
+              (setq pos (point)))))))))
+
 (defun vterm-ai-dashboard--sort-sessions (sessions)
   "Return SESSIONS ordered ASKING, DONE, IDLE, BUSY, then everything else.
 Sessions with the same status keep their relative order."
@@ -203,9 +238,8 @@ WIDTH is the available window width."
          (text-width (max 1 (- width (length prompt-indent) 2)))
          (start (point)))
     ;; Line 1: [STATUS ELAPSED] type: title
-    (insert (propertize (vterm-ai-dashboard--status-label
-                         status (vterm-ai-session-state-since session))
-                        'face status-face)
+    (insert (vterm-ai-dashboard--label-string
+             status (vterm-ai-session-state-since session) status-face)
             " "
             (propertize (or (vterm-ai-session-type session) "") 'face 'vterm-ai-label)
             ": "
@@ -253,9 +287,9 @@ WIDTH is the available window width."
              (label (or (plist-get child :title) (plist-get child :msg)
                         (plist-get child :id))))
         (insert "  └ "
-                (propertize (vterm-ai-dashboard--status-label
-                             child-status (plist-get child :since))
-                            'face (vterm-ai-dashboard--status-face child-status))
+                (vterm-ai-dashboard--label-string
+                 child-status (plist-get child :since)
+                 (vterm-ai-dashboard--status-face child-status))
                 " "
                 (truncate-string-to-width label (max 1 (- width 20)) nil nil "…")
                 "\n")))
@@ -283,7 +317,11 @@ WIDTH is the available window width."
          (saved-line (line-number-at-pos))
          (win (or (get-buffer-window (current-buffer)) (selected-window)))
          (width (window-width win))
-         (sep-width (max 1 (min width 80))))
+         (sep-width (max 1 (min width 80)))
+         ;; erase-buffer collapses window-start; keep each window's top line.
+         (window-lines (mapcar (lambda (w)
+                                 (cons w (line-number-at-pos (window-start w))))
+                               (get-buffer-window-list (current-buffer) nil t))))
     (erase-buffer)
     (vterm-ai-dashboard--insert-keybinding-hint sep-width)
     (if (null sessions)
@@ -316,7 +354,14 @@ WIDTH is the available window width."
               (if (and s (equal (vterm-ai-session-pid s) target-pid))
                   (setq found t)
                 (forward-line 1)))))
-      (forward-line (1- (min saved-line (line-number-at-pos (point-max))))))))
+      (forward-line (1- (min saved-line (line-number-at-pos (point-max))))))
+    (dolist (cell window-lines)
+      (set-window-start (car cell)
+                        (save-excursion
+                          (goto-char (point-min))
+                          (forward-line (1- (cdr cell)))
+                          (point))
+                        t))))
 
 (defun vterm-ai-dashboard--update-header (sessions)
   "Update the header line based on SESSIONS."
@@ -401,17 +446,13 @@ also run a full collection to discover it."
           (vterm-ai-dashboard--relayout))))))
 
 (defun vterm-ai-dashboard--tick ()
-  "Redraw to advance elapsed times while any session shows one."
+  "Advance elapsed times while the dashboard is on a visible frame."
   (let ((buf (get-buffer "*vterm-ai*")))
     (if (not (buffer-live-p buf))
         (vterm-ai-dashboard--stop-timer)
-      (with-current-buffer buf
-        (when (and (get-buffer-window buf t)
-                   (cl-some (lambda (s)
-                              (or (vterm-ai-session-state-since s)
-                                  (vterm-ai-session-children s)))
-                            vterm-ai-dashboard--sessions))
-          (vterm-ai-dashboard--relayout))))))
+      (when (get-buffer-window buf 'visible)
+        (with-current-buffer buf
+          (vterm-ai-dashboard--update-elapsed))))))
 
 (defun vterm-ai-dashboard--start-timer (interval)
   "Start refresh timer with INTERVAL seconds."
@@ -536,6 +577,8 @@ also run a full collection to discover it."
 
 (define-derived-mode vterm-ai-dashboard-mode special-mode "VtermAI"
   "Major mode for the vterm-ai dashboard."
+  ;; The buffer is regenerated, never edited; undo records would only pile up.
+  (buffer-disable-undo)
   (setq-local revert-buffer-function
               (lambda (_ignore-auto _noconfirm)
                 (vterm-ai-dashboard--refresh)))

@@ -66,6 +66,11 @@ This opens the `*vterm-ai*` dashboard buffer, which auto-refreshes every 30 seco
 
 ;; Dashboard refresh interval in seconds (default: 30)
 (setq vterm-ai-refresh-interval 30)
+
+;; Seconds between elapsed-time updates, or nil to stop them (default: 10).
+;; An update rewrites only the time labels, and only while the dashboard
+;; is on a visible frame; state changes redraw immediately regardless.
+(setq vterm-ai-dashboard-tick-interval 10)
 ```
 
 #### Multiple Claude config directories
